@@ -287,6 +287,7 @@ export class Agent {
             tc.name,
             tc.input,
             this.toolCtx,
+            signal,
           );
           ev.toolEnd(tc.id, res.text, res.isError ?? false);
           results[i] = {

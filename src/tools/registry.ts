@@ -46,7 +46,8 @@ export interface Tool {
   spec: ToolSpec;
   /** Requires user approval before running (mutates the system). */
   risky?: boolean;
-  run(input: any, ctx: ToolContext): Promise<ToolResult>;
+  /** `signal` aborts on Esc/interrupt — long in-process tools (glob) honor it. */
+  run(input: any, ctx: ToolContext, signal?: AbortSignal): Promise<ToolResult>;
 }
 
 function previewOf(name: string, input: any): string {
@@ -80,9 +81,15 @@ export class ToolRegistry {
     return [...this.tools.values()].map((t) => t.spec);
   }
 
-  async dispatch(name: string, input: any, ctx: ToolContext): Promise<ToolResult> {
+  async dispatch(
+    name: string,
+    input: any,
+    ctx: ToolContext,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     const t = this.tools.get(name);
     if (!t) return { text: `unknown tool: ${name}`, isError: true };
+    if (signal?.aborted) return { text: "✗ interrupted", isError: true };
 
     if (ctx.engine) {
       const verdict = ctx.engine.evaluate(name, input, t.risky ?? false);
@@ -109,7 +116,7 @@ export class ToolRegistry {
 
     let result: ToolResult;
     try {
-      result = await t.run(input, ctx);
+      result = await t.run(input, ctx, signal);
     } catch (err: any) {
       return { text: `tool ${name} failed: ${err?.message ?? String(err)}`, isError: true };
     }

@@ -1,6 +1,31 @@
 import { readFile, writeFile, mkdir, glob } from "node:fs/promises";
-import { dirname, resolve, isAbsolute } from "node:path";
+import { dirname, resolve, isAbsolute, basename } from "node:path";
 import type { Tool } from "./registry.js";
+
+// Dirs that are never search targets and blow up a recursive walk. Pruned
+// during glob traversal (descent stops), so `glob` from a deep/home dir can't
+// hang on node_modules/.git/caches.
+const GLOB_PRUNE = new Set([
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  ".cache",
+  ".npm",
+  ".pnpm-store",
+  ".yarn",
+  ".cargo",
+  ".rustup",
+  ".gradle",
+  ".m2",
+  ".nuget",
+  "__pycache__",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".venv",
+  "venv",
+]);
+const GLOB_DEADLINE_MS = 10_000; // wall-clock budget; enforced via the prune hook
 
 function abs(cwd: string, p: string): string {
   return isAbsolute(p) ? p : resolve(cwd, p);
@@ -187,18 +212,50 @@ export const globTool: Tool = {
       required: ["pattern"],
     },
   },
-  async run(input, ctx) {
+  async run(input, ctx, signal) {
     const base = input.path ? abs(ctx.cwd, input.path) : ctx.cwd;
     const matches: string[] = [];
     const LIMIT = 1000;
-    for await (const entry of glob(input.pattern, { cwd: base })) {
-      matches.push(entry);
-      if (matches.length >= LIMIT) break;
+    const deadline = Date.now() + GLOB_DEADLINE_MS;
+    let stopped: string | null = null;
+
+    // `exclude` is the traversal-control hook: returning true prunes a path
+    // (and stops descending into a directory). We use it both to skip heavy
+    // dirs and to hard-stop the walk on timeout/abort — once `stopped` is set,
+    // every remaining path is pruned so the walk unwinds instead of hanging.
+    const exclude = (p: any): boolean => {
+      if (stopped) return true;
+      if (signal?.aborted) {
+        stopped = "interrupted";
+        return true;
+      }
+      if (Date.now() > deadline) {
+        stopped = "timed out after 10s";
+        return true;
+      }
+      const name = basename(typeof p === "string" ? p : p?.name ?? "");
+      return GLOB_PRUNE.has(name);
+    };
+
+    try {
+      const it = glob(input.pattern, { cwd: base, exclude }) as AsyncIterable<string>;
+      for await (const entry of it) {
+        matches.push(entry);
+        if (matches.length >= LIMIT) {
+          stopped = `capped at ${LIMIT}`;
+          break;
+        }
+      }
+    } catch (err: any) {
+      if (err?.name !== "AbortError")
+        return { text: `glob failed: ${err?.message ?? String(err)}`, isError: true };
     }
-    if (matches.length === 0) return { text: "no matches" };
+
+    if (matches.length === 0)
+      return { text: stopped ? `no matches (${stopped})` : "no matches" };
     matches.sort();
-    const head = matches.slice(0, LIMIT).join("\n");
-    return { text: matches.length >= LIMIT ? head + `\n… (capped at ${LIMIT})` : head };
+    const body = matches.join("\n");
+    return { text: stopped ? `${body}\n… (${stopped})` : body };
   },
 };
 
