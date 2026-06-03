@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.env
+.system_prompt.js
