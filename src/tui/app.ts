@@ -32,6 +32,7 @@ import type { FileCheckpointer } from "../checkpoint.js";
 import type { SessionStore } from "../store.js";
 import type { UndercoverState } from "../utils/redact.js";
 import { savePrefs } from "../prefs.js";
+import { loadHistory, pushHistory } from "../history.js";
 
 export interface ProviderEntry {
   name: string;
@@ -128,6 +129,9 @@ export class App {
   private async submit(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // Record every submission for bash-style up/down recall (incl. slash cmds).
+    this.slot.editor.addToHistory(trimmed);
+    pushHistory(trimmed);
     if (trimmed.startsWith("/")) {
       this.handleCommand(trimmed);
       return;
@@ -588,6 +592,7 @@ export class App {
       ),
     );
     this.slot.editor.onSubmit = (text) => void this.submit(text);
+    for (const h of loadHistory()) this.slot.editor.addToHistory(h); // oldest→newest
     this.pm.onBackgroundExit = (rec) => this.onBackgroundExit(rec);
 
     if (this.session.messages.length > 0) this.view.renderHistory(this.session);
