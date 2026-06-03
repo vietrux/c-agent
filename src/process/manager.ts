@@ -199,6 +199,23 @@ export class ProcessManager {
     return id;
   }
 
+  /**
+   * Kill every running foreground job (Esc interrupt). Background jobs the user
+   * explicitly detached survive. Returns the count killed. Killing unblocks the
+   * agent's awaited `run()` so the turn can report interrupted.
+   */
+  interruptForeground(signal: NodeJS.Signals = "SIGTERM"): number {
+    let n = 0;
+    for (const rec of this.procs.values()) {
+      if (rec.running && !rec.background) {
+        rec.child.kill(signal);
+        n++;
+      }
+    }
+    this.activeForeground = null;
+    return n;
+  }
+
   /** Background processes (for the /bg panel). */
   listBackground(): Array<Pick<ProcRecord, "id" | "command" | "running" | "exitCode">> {
     return this.list().filter((p) => {
