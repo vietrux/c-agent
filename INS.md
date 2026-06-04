@@ -45,39 +45,6 @@ npm i -g .       # snapshot copy (must reinstall after each change)
 npm rm -g c-agent
 ```
 
-## Standalone binaries (multiple OS)
-
-Build self-contained executables (bundled runtime — no Node needed on the target)
-for the common OS/arch targets. Requires [Bun](https://bun.sh) on the build machine;
-Bun cross-compiles all targets from any one host.
-
-```bash
-npm run build:bin            # all targets → dist-bin/
-npm run build:bin -- linux-x64 darwin-arm64   # only specific targets
-```
-
-Outputs in `dist-bin/`:
-
-| file                       | OS / arch              |
-| -------------------------- | ---------------------- |
-| `cagent-linux-x64`         | Linux x86-64           |
-| `cagent-linux-arm64`       | Linux ARM64            |
-| `cagent-darwin-x64`        | macOS Intel            |
-| `cagent-darwin-arm64`      | macOS Apple Silicon    |
-| `cagent-windows-x64.exe`   | Windows x86-64         |
-
-Run directly, e.g. `./dist-bin/cagent-linux-x64`. Each still needs
-`~/.c-agent/settings.json` for a provider. Binaries are ~60–112 MB (embedded
-runtime) and are gitignored.
-
-Notes:
-- Only the Linux x64 build is smoke-tested in CI/dev here; macOS and Windows
-  binaries are produced but must be verified on their own OS.
-- pi-tui's optional native key-modifier addons are not embedded; the binaries
-  fall back gracefully (key handling still works via escape sequences).
-- On Windows the agent's `bash` tool needs a POSIX shell (Git Bash / WSL);
-  the rest of the TUI is cross-platform.
-
 ## Configure a provider
 
 Providers come **only** from `~/.c-agent/settings.json` (no built-in default).
