@@ -91,6 +91,7 @@ function normalizeSchema(schema: any): Record<string, any> {
 
 function makeResourceTool(byName: Map<string, McpClient>): Tool {
   return {
+    concurrencySafe: true,
     spec: {
       name: "read_mcp_resource",
       description:

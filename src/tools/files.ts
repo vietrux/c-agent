@@ -32,6 +32,7 @@ function abs(cwd: string, p: string): string {
 }
 
 export const readTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "read",
     description:
@@ -196,6 +197,7 @@ export const multiEditTool: Tool = {
 };
 
 export const globTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "glob",
     description:
@@ -272,6 +274,7 @@ async function hasRg(ctx: { pm: { run: (o: any) => Promise<{ exitCode: number | 
 const q = (s: string) => JSON.stringify(s);
 
 export const grepTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "grep",
     description:

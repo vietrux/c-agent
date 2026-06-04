@@ -17,6 +17,7 @@ const HTML_DEC: Record<string, string> = {
 };
 
 export const codecTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "encode_decode",
     description:

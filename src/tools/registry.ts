@@ -46,6 +46,12 @@ export interface Tool {
   spec: ToolSpec;
   /** Requires user approval before running (mutates the system). */
   risky?: boolean;
+  /**
+   * Safe to run in parallel with other concurrency-safe calls: read-only, no
+   * side effects, order-independent (read/grep/glob/…). Defaults to false —
+   * write/exec tools run serially so parallel calls can't corrupt shared state.
+   */
+  concurrencySafe?: boolean;
   /** `signal` aborts on Esc/interrupt — long in-process tools (glob) honor it. */
   run(input: any, ctx: ToolContext, signal?: AbortSignal): Promise<ToolResult>;
 }
@@ -79,6 +85,11 @@ export class ToolRegistry {
 
   specs(): ToolSpec[] {
     return [...this.tools.values()].map((t) => t.spec);
+  }
+
+  /** True if the named tool is read-only/side-effect-free → safe to parallelize. */
+  isConcurrencySafe(name: string): boolean {
+    return this.tools.get(name)?.concurrencySafe ?? false;
   }
 
   async dispatch(

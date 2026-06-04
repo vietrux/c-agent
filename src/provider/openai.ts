@@ -15,7 +15,9 @@ export class OpenAIProvider implements Provider {
   model: string;
 
   constructor(opts: { apiKey: string; baseURL?: string; model: string }) {
-    this.client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
+    // SDK retries transient failures (429/5xx/network) with exponential backoff
+    // and honors Retry-After; bumped above the default 2 for flaky proxies.
+    this.client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 5 });
     this.model = opts.model;
   }
 

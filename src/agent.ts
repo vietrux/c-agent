@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { Session } from "./session.js";
 import { ToolRegistry, ToolContext } from "./tools/registry.js";
-import { BASE_SYSTEM_A, BASE_SYSTEM_C } from "./.system_prompt.js";
+import { BASE_SYSTEM_A, BEHAVIOR_GUIDANCE_C } from "./.system_prompt.js";
 import type { Provider, Usage, NeutralMessage } from "./provider/types.js";
 
 export interface AgentEvents {
@@ -17,8 +17,37 @@ export interface AgentEvents {
 }
 
 const BASE_SYSTEM =
-  BASE_SYSTEM_C ||
+  BASE_SYSTEM_A ||
   "You are c-agent, an interactive CLI tool specialized for coding task.";
+
+// Behavioral guidance appended to every system prompt. Mirrors the higher-signal
+// instructions from Claude Code's internal build: comment discipline, verify-
+// before-claiming, faithful reporting, collaborator stance, and concrete
+// communication/length rules. Kept here (not in the base prompt module) so it
+// layers on top of whatever base prompt is loaded.
+const BEHAVIOR_GUIDANCE = `# Doing tasks well
+
+- Comments: default to writing NO code comments. Add one only when the logic is genuinely non-obvious — a hidden constraint, a subtle invariant, a workaround for a specific bug. Never narrate what the code does or reference the current task/caller; well-named identifiers and the commit message already cover that.
+- Verify before you claim done. Run the project's typecheck / lint / tests (or the relevant command) and confirm they pass before reporting a task complete. If you cannot verify something (e.g. a UI change you can't exercise), say so explicitly instead of claiming success.
+- Report outcomes faithfully. Never say something works, passed, or is fixed unless you actually checked. If you are unsure, say you are unsure. Do not overstate results or hide failures, errors, or partial work.
+- Be a collaborator, not just an order-taker. If the user is wrong, an approach has a bug, or a simpler/safer path exists, say so directly before proceeding. Surface risks and tradeoffs rather than silently complying.
+
+# Communicating with the user
+
+Your text output is the only thing the user sees — they cannot see your thinking or most tool calls. Communicate like a sharp engineer pairing out loud: brief, concrete, and only when it adds signal.
+
+- Before the first tool call of a turn, state in one sentence what you are about to do.
+- Give a short update when you find something, change direction, or hit a blocker. One sentence is almost always enough — silent is worse than brief.
+- State results and decisions directly. Do not narrate internal deliberation or list every step you considered.
+- End a turn with a one- or two-sentence summary: what changed and what's next. Nothing more.
+- Match the response to the task: a simple question gets a direct answer, not headers and sections. Use \`file_path:line\` when pointing at code.
+
+Length anchors (defaults, not hard limits — exceed only when the task truly needs it):
+- Keep text between tool calls to about 25 words or fewer.
+- Keep a normal response under about 100 words unless the user asks for depth or the content (code, a report) requires more.
+- One-word answers are fine when that is the honest, complete answer.
+
+${BEHAVIOR_GUIDANCE_C || ""}`;
 
 const MAX_STEPS = 100;
 const MAX_TOOL_RESULT = 64_000; // chars of tool output fed back to the model
@@ -28,9 +57,25 @@ const MAX_TOOL_RESULT = 64_000; // chars of tool output fed back to the model
 const CONTEXT_TOKENS = Number(process.env.C_AGENT_CONTEXT_TOKENS) || 160_000;
 const COMPACT_RATIO = 0.8;
 const KEEP_TURNS = 3; // recent user turns kept verbatim across a compaction
+// Microcompaction clears the content of older tool results (keeping the most
+// recent few) before resorting to a full summary — far cheaper, and the
+// tool_use/tool_result structure stays intact so nothing breaks.
+const MICRO_KEEP = 4;
+const CLEARED_TOOL_RESULT = "[Old tool result content cleared]";
+const MAX_COMPACT_FAILURES = 3; // circuit breaker: stop retrying a failing summary
 
 function isAbort(err: any): boolean {
   return err?.name === "AbortError" || /abort/i.test(err?.message ?? "");
+}
+
+/** A context-window-overflow error (so we can compact and retry instead of dying). */
+function isContextOverflow(err: any): boolean {
+  const status = err?.status ?? err?.statusCode;
+  if (status === 413) return true;
+  const msg = `${err?.message ?? ""} ${err?.error?.message ?? ""}`;
+  return /context[\s_]?length|prompt is too long|maximum context|context_length_exceeded|too many (input )?tokens|reduce the (length|amount)/i.test(
+    msg,
+  );
 }
 
 function estTokens(messages: NeutralMessage[]): number {
@@ -69,6 +114,22 @@ function renderTranscript(messages: NeutralMessage[]): string {
   return out.join("\n");
 }
 
+// Structured summary prompt for compaction — a dense, sectioned handoff note
+// preserves far more usable context than a free-form paragraph.
+const COMPACT_SUMMARY_SYSTEM = `You are compacting a software-engineering conversation into a dense handoff note so another session can continue the work with full context. Be specific and concrete: use real names, file paths, signatures, and short code snippets where they matter. Do not summarize away detail that would be needed to resume the work.
+
+Output ONLY the note, wrapped in <summary> tags, with these sections:
+1. Primary Request and Intent — what the user is ultimately trying to accomplish, including explicit constraints and preferences.
+2. Key Technical Concepts — frameworks, libraries, patterns, and domain facts in play.
+3. Files and Code Sections — every file read or changed and why; include important snippets or signatures.
+4. Errors and Fixes — failures hit and how each was resolved (or not).
+5. Problem Solving — decisions made and the reasoning behind them.
+6. Pending Tasks — work explicitly requested but not yet done.
+7. Current Work — what was happening immediately before this summary.
+8. Next Step — the single most likely next action, if any (omit if unclear).
+
+No preamble, no commentary outside the <summary> tags.`;
+
 /** Keep head+tail so both the command echo and the tail of long output survive. */
 function capResult(text: string): string {
   if (text.length <= MAX_TOOL_RESULT) return text;
@@ -84,6 +145,13 @@ export class Agent {
   readonly usage: Usage = { input: 0, output: 0, cached: 0 };
   /** Last request's usage = current context-window occupancy (footer display). */
   readonly lastUsage: Usage = { input: 0, output: 0, cached: 0 };
+  // Context-size anchor: the real prompt-token count of the last request and the
+  // message count at that point. contextTokens() = anchor + estimate of messages
+  // appended since, so system+tool-schema tokens are counted accurately (a raw
+  // chars/4 over the transcript ignores them and compacts too late).
+  private lastSentTokens = 0;
+  private lastSentMsgCount = 0;
+  private compactFailures = 0; // consecutive failed summaries (circuit breaker)
 
   get model() {
     return this.provider.model;
@@ -124,6 +192,8 @@ export class Agent {
   /** Swap the active transcript (used by /resume). */
   setSession(session: Session) {
     this.session = session;
+    this.lastSentTokens = 0; // re-anchor context accounting to the new transcript
+    this.lastSentMsgCount = 0;
   }
 
   async run(
@@ -157,8 +227,20 @@ export class Agent {
     await this.loop(ev);
   }
 
-  /** Estimated tokens of the current transcript. */
+  /**
+   * Estimated tokens currently in the model's context window. Anchors on the
+   * real prompt-token count from the last API response (which already includes
+   * the system prompt + tool schemas) and adds a chars/4 estimate only for
+   * messages appended since that request. Falls back to a transcript estimate
+   * before the first response.
+   */
   contextTokens(): number {
+    if (this.lastSentTokens > 0) {
+      return (
+        this.lastSentTokens +
+        estTokens(this.session.messages.slice(this.lastSentMsgCount))
+      );
+    }
     return estTokens(this.session.messages);
   }
 
@@ -168,6 +250,7 @@ export class Agent {
    * Returns true if it compacted.
    */
   async compact(ev: AgentEvents, signal?: AbortSignal): Promise<boolean> {
+    if (this.compactFailures >= MAX_COMPACT_FAILURES) return false; // circuit breaker
     const cps = this.session.checkpoints;
     if (cps.length <= KEEP_TURNS) return false;
     const keepFrom = cps.length - KEEP_TURNS;
@@ -181,13 +264,11 @@ export class Agent {
     let summary: string;
     try {
       const res = await this.provider.stream(
-        "You compress a software-engineering chat transcript into a dense handoff note. " +
-          "Preserve: the user's goals, decisions made, files changed and why, key facts learned, " +
-          "and any unfinished work. Be specific (names, paths). Output prose, no preamble.",
+        COMPACT_SUMMARY_SYSTEM,
         [
           {
             role: "user",
-            content: `Summarize this transcript:\n\n${renderTranscript(older)}`,
+            content: `Summarize the conversation so far into the structured handoff note described above.\n\n<transcript>\n${renderTranscript(older)}\n</transcript>`,
           },
         ],
         [],
@@ -196,9 +277,14 @@ export class Agent {
       );
       summary = res.text.trim();
     } catch {
+      this.compactFailures++; // count toward the circuit breaker
       return false; // summarization failed — keep full transcript
     }
-    if (!summary) return false;
+    if (!summary) {
+      this.compactFailures++;
+      return false;
+    }
+    this.compactFailures = 0; // success — reset the breaker
 
     const summaryMsg: NeutralMessage = {
       role: "assistant",
@@ -208,25 +294,73 @@ export class Agent {
     // Drop checkpoints: collapsed history is no longer individually rewindable.
     // New turns re-accumulate checkpoints from a clean base.
     this.session.replace([summaryMsg, ...kept], []);
+    this.lastSentTokens = 0; // transcript shrank — re-anchor on the next request
+    this.lastSentMsgCount = 0;
     ev.compacted?.(
       `compacted ${older.length} messages → summary (${KEEP_TURNS} turns kept)`,
     );
     return true;
   }
 
+  /**
+   * Clear the content of older tool results (keeping the most recent MICRO_KEEP
+   * intact), leaving their tool_use/tool_result structure in place. Cheap way to
+   * reclaim context before resorting to a full summary. Returns ~tokens freed.
+   */
+  private microCompact(): number {
+    const msgs = this.session.messages;
+    const toolIdx: number[] = [];
+    for (let i = 0; i < msgs.length; i++)
+      if (msgs[i].role === "tool") toolIdx.push(i);
+    if (toolIdx.length <= MICRO_KEEP) return 0;
+    const keep = new Set(toolIdx.slice(-MICRO_KEEP));
+
+    let clearedChars = 0;
+    for (const i of toolIdx) {
+      if (keep.has(i)) continue;
+      const m = msgs[i];
+      if (m.role !== "tool") continue;
+      for (const r of m.results) {
+        if (r.content === CLEARED_TOOL_RESULT) continue;
+        clearedChars += r.content.length;
+        r.content = CLEARED_TOOL_RESULT;
+      }
+    }
+    if (clearedChars === 0) return 0;
+
+    const freed = Math.ceil(clearedChars / 4);
+    // The cleared results were part of the last request → shrink the anchor so
+    // the context estimate reflects the reclaimed space immediately.
+    this.lastSentTokens = Math.max(0, this.lastSentTokens - freed);
+    this.session.replace(msgs, this.session.checkpoints); // persist the edit
+    return freed;
+  }
+
   private async loop(ev: AgentEvents): Promise<void> {
     this.ac = new AbortController();
     const signal = this.ac.signal;
+    let recoveredOverflow = false; // one prompt-too-long recovery per turn
 
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return ev.interrupted();
 
       if (this.contextTokens() > CONTEXT_TOKENS * COMPACT_RATIO) {
-        await this.compact(ev, signal);
+        // Cheap pass first: clear old tool output. Only summarize if still over.
+        const freed = this.microCompact();
+        if (freed > 0)
+          ev.compacted?.(
+            `micro-compacted: cleared ~${freed} tokens of old tool output`,
+          );
+        if (this.contextTokens() > CONTEXT_TOKENS * COMPACT_RATIO) {
+          await this.compact(ev, signal);
+        }
         if (signal.aborted) return ev.interrupted();
       }
 
       ev.status("thinking…");
+
+      // Message count at send time — the anchor for context accounting below.
+      const sentMsgCount = this.session.messages.length;
 
       let result;
       try {
@@ -243,6 +377,17 @@ export class Agent {
       } catch (err) {
         ev.assistantEnd();
         if (isAbort(err)) return ev.interrupted();
+        // Context overflow: reclaim space (micro then summary) and retry once.
+        if (isContextOverflow(err) && !recoveredOverflow) {
+          recoveredOverflow = true;
+          this.microCompact();
+          const did = await this.compact(ev, signal);
+          if (signal.aborted) return ev.interrupted();
+          if (did) {
+            step--; // retry this step with the shrunken transcript
+            continue;
+          }
+        }
         throw err;
       }
 
@@ -255,6 +400,10 @@ export class Agent {
       this.lastUsage.input = usage.input;
       this.lastUsage.output = usage.output;
       this.lastUsage.cached = usage.cached;
+      // Anchor context accounting on this real count (input includes system +
+      // tool schemas + everything sent up to sentMsgCount).
+      this.lastSentTokens = usage.input;
+      this.lastSentMsgCount = sentMsgCount;
       ev.assistantEnd();
       this.session.push({ role: "assistant", content: text, toolCalls });
 
@@ -263,45 +412,80 @@ export class Agent {
         return;
       }
 
-      // Dispatch all tool calls concurrently. Approvals serialize themselves via
-      // the UI (one prompt at a time); execution overlaps. Results stay in order.
       ev.status(
         toolCalls.length > 1
           ? `running ${toolCalls.length} tools…`
           : `tool: ${toolCalls[0].name}`,
       );
-      const results = new Array<{
-        id: string;
-        content: string;
-        isError: boolean;
-      }>(toolCalls.length);
-      await Promise.all(
-        toolCalls.map(async (tc, i) => {
-          ev.toolStart(tc.id, tc.name, tc.input);
-          if (signal.aborted) {
-            results[i] = { id: tc.id, content: "✗ interrupted", isError: true };
-            ev.toolEnd(tc.id, "✗ interrupted", true);
-            return;
-          }
-          const res = await this.registry.dispatch(
-            tc.name,
-            tc.input,
-            this.toolCtx,
-            signal,
-          );
-          ev.toolEnd(tc.id, res.text, res.isError ?? false);
-          results[i] = {
-            id: tc.id,
-            content: capResult(res.text),
-            isError: res.isError ?? false,
-          };
-        }),
-      );
+      const results = await this.runTools(toolCalls, ev, signal);
       this.session.push({ role: "tool", results }); // keep tool_use/tool_result paired
       if (signal.aborted) return ev.interrupted();
     }
     ev.status(null);
     ev.toolEnd("agent", `stopped after ${MAX_STEPS} steps`, true);
+  }
+
+  /**
+   * Execute a turn's tool calls, preserving result order. Consecutive
+   * concurrency-safe (read-only) calls run in parallel; write/exec calls run
+   * serially so two parallel mutations can't corrupt shared state (e.g. two
+   * edits to the same file, or a read racing a write).
+   */
+  private async runTools(
+    toolCalls: { id: string; name: string; input: any }[],
+    ev: AgentEvents,
+    signal: AbortSignal,
+  ): Promise<{ id: string; content: string; isError: boolean }[]> {
+    const results = new Array<{
+      id: string;
+      content: string;
+      isError: boolean;
+    }>(toolCalls.length);
+
+    const runOne = async (
+      tc: { id: string; name: string; input: any },
+      i: number,
+    ) => {
+      ev.toolStart(tc.id, tc.name, tc.input);
+      if (signal.aborted) {
+        results[i] = { id: tc.id, content: "✗ interrupted", isError: true };
+        ev.toolEnd(tc.id, "✗ interrupted", true);
+        return;
+      }
+      const res = await this.registry.dispatch(
+        tc.name,
+        tc.input,
+        this.toolCtx,
+        signal,
+      );
+      ev.toolEnd(tc.id, res.text, res.isError ?? false);
+      results[i] = {
+        id: tc.id,
+        content: capResult(res.text),
+        isError: res.isError ?? false,
+      };
+    };
+
+    let i = 0;
+    while (i < toolCalls.length) {
+      if (this.registry.isConcurrencySafe(toolCalls[i].name)) {
+        // Batch consecutive read-only calls and run them together.
+        const batch: Promise<void>[] = [];
+        while (
+          i < toolCalls.length &&
+          this.registry.isConcurrencySafe(toolCalls[i].name)
+        ) {
+          batch.push(runOne(toolCalls[i], i));
+          i++;
+        }
+        await Promise.all(batch);
+      } else {
+        // A write/exec call runs alone, to completion, before the next call.
+        await runOne(toolCalls[i], i);
+        i++;
+      }
+    }
+    return results;
   }
 }
 
@@ -317,7 +501,7 @@ function buildSystem(
     `shell: ${process.env.SHELL ?? "unknown"}`,
     `date: ${now.toISOString().slice(0, 10)}`,
   ];
-  let prompt = `${base}\n\n<environment>\n${env.join("\n")}\n</environment>`;
+  let prompt = `${base}\n\n${BEHAVIOR_GUIDANCE}\n\n<environment>\n${env.join("\n")}\n</environment>`;
 
   if (skills && skills.length > 0) {
     const list = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");

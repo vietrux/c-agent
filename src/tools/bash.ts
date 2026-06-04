@@ -61,6 +61,7 @@ export const bashTool: Tool = {
 };
 
 export const procListTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "proc_list",
     description: "List all spawned processes with id, command, running state, exit code.",
@@ -78,6 +79,7 @@ export const procListTool: Tool = {
 };
 
 export const procTailTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "proc_tail",
     description: "Get the last N output lines of a process by id.",

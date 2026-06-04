@@ -14,7 +14,9 @@ export class AnthropicProvider implements Provider {
   model: string;
 
   constructor(opts: { apiKey: string; baseURL?: string; model: string }) {
-    this.client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL });
+    // SDK retries transient failures (429/5xx/overloaded) with exponential
+    // backoff and honors Retry-After; bumped above the default 2.
+    this.client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 5 });
     this.model = opts.model;
   }
 
@@ -61,17 +63,26 @@ export class AnthropicProvider implements Provider {
     handlers: StreamHandlers,
     signal?: AbortSignal,
   ): Promise<StreamResult> {
+    const wireMessages = this.toWire(messages);
+    // Prompt caching: one breakpoint after system+tools (the large static
+    // prefix) and one on the last message (the running conversation). Each turn
+    // only the new tail is uncached — big cost/latency win on repeat requests.
+    // Markers are ignored below the model's minimum cacheable size, so this is
+    // always safe to send.
+    applyCacheBreakpoint(wireMessages);
     const stream = this.client.messages.stream(
       {
         model: this.model,
         max_tokens: 8192,
-        system,
+        system: [
+          { type: "text", text: system, cache_control: { type: "ephemeral" } },
+        ],
         tools: tools.map((t) => ({
           name: t.name,
           description: t.description,
           input_schema: t.parameters as Anthropic.Tool.InputSchema,
         })),
-        messages: this.toWire(messages),
+        messages: wireMessages,
       },
       { signal },
     );
@@ -86,13 +97,33 @@ export class AnthropicProvider implements Provider {
         toolCalls.push({ id: block.id, name: block.name, input: block.input });
       }
     }
+    // Real prompt size = uncached + cache-read + cache-creation. With caching on,
+    // `input_tokens` alone is only the uncached tail, so it must be summed or the
+    // footer and context accounting would massively undercount the window.
+    const u = final.usage;
     const usage: Usage = {
-      input: final.usage.input_tokens ?? 0,
-      output: final.usage.output_tokens ?? 0,
-      cached: final.usage.cache_read_input_tokens ?? 0,
+      input:
+        (u.input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0),
+      output: u.output_tokens ?? 0,
+      cached: u.cache_read_input_tokens ?? 0,
     };
     return { text, toolCalls, usage };
   }
+}
+
+/** Put an ephemeral cache breakpoint on the last block of the last message. */
+function applyCacheBreakpoint(msgs: Anthropic.MessageParam[]): void {
+  const last = msgs[msgs.length - 1];
+  if (!last) return;
+  const blocks = toBlocks(last.content).map((b) => ({ ...b }));
+  if (blocks.length === 0) return;
+  blocks[blocks.length - 1] = {
+    ...blocks[blocks.length - 1],
+    cache_control: { type: "ephemeral" },
+  } as Anthropic.ContentBlockParam;
+  last.content = blocks;
 }
 
 function toBlocks(content: Anthropic.MessageParam["content"]): Anthropic.ContentBlockParam[] {

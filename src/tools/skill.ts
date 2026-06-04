@@ -1,6 +1,7 @@
 import type { Tool } from "./registry.js";
 
 export const skillTool: Tool = {
+  concurrencySafe: true,
   spec: {
     name: "skill",
     description:
