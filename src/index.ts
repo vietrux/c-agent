@@ -142,7 +142,15 @@ async function main() {
   const agentDefs = loadAgentDefs(cwd);
   const hooks = new HookRunner(settings.hooks);
 
-  const toolCtx: ToolContext = { pm, cwd, todos: [], engine, checkpointer, skills, hooks };
+  const toolCtx: ToolContext = {
+    pm,
+    cwd,
+    todos: [],
+    engine,
+    checkpointer,
+    skills,
+    hooks,
+  };
 
   // Subagent spawner: fresh session + agent, optional role from an agent def.
   toolCtx.spawn = async (prompt: string, agentType?: string): Promise<string> => {

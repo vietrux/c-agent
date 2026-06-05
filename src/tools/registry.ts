@@ -4,8 +4,6 @@ import type { PermissionEngine, RuleSuggestion } from "../permissions.js";
 import type { FileCheckpointer } from "../checkpoint.js";
 import type { Skill } from "../skills.js";
 import type { HookRunner } from "../hooks.js";
-import type { ConsultantConfig } from "../settings.js";
-import type { UndercoverState } from "../utils/redact.js";
 
 export interface TodoItem {
   text: string;
@@ -48,10 +46,6 @@ export interface ToolContext {
   spawn?: (prompt: string, agentType?: string) => Promise<string>;
   /** Lifecycle shell hooks (PreToolUse / PostToolUse). */
   hooks?: HookRunner;
-  /** Config for the external-consultant (`ask_claude`) tool. */
-  consultant?: ConsultantConfig;
-  /** Undercover (PII-masking) state — `ask_claude` warns when this is on. */
-  undercover?: UndercoverState;
 }
 
 export interface ToolResult {
@@ -135,8 +129,6 @@ export function validateToolInput(schema: any, input: any): string | null {
 function previewOf(name: string, input: any): string {
   if (input?.command) return String(input.command);
   if (input?.path) return String(input.path);
-  // ask_claude: surface the question being sent off-machine to an external model.
-  if (input?.problem) return `→ external Claude: ${String(input.problem).slice(0, 160)}`;
   if (input?.id) return String(input.id);
   try {
     return JSON.stringify(input ?? {}).slice(0, 200);
