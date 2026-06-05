@@ -16,6 +16,7 @@ interface Rule {
 /** The string compared against a rule's argument matcher, per tool. */
 function ruleTarget(tool: string, input: any): string {
   if (tool === "bash") return String(input?.command ?? "");
+  if (input?.url) return String(input.url);
   if (input?.path) return String(input.path);
   if (input?.pattern) return String(input.pattern);
   try {

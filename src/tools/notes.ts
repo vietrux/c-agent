@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { Tool } from "./registry.js";
 
-const NOTES_DIR = join(homedir(), ".cagent");
+const NOTES_DIR = join(homedir(), ".c-agent");
 const NOTES_FILE = join(NOTES_DIR, "notes.json");
 
 async function load(): Promise<Record<string, string>> {
@@ -23,7 +23,7 @@ export const notesTool: Tool = {
   spec: {
     name: "notes",
     description:
-      "Persistent key-value store across sessions saved to ~/.cagent/notes.json. " +
+      "Persistent key-value store across sessions saved to ~/.c-agent/notes.json. " +
       "Use for creds, live hosts, shell access, flags, IPs, tokens — anything to remember, project state, config values, reminders — anything worth persisting across sessions. " +
       "action=set: store key+value. " +
       "action=get: retrieve by key. " +

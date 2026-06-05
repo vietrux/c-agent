@@ -3,6 +3,7 @@ import type { Tool } from "./registry.js";
 const BODY_CAP = 32_768;
 
 export const httpRequestTool: Tool = {
+  risky: true,
   spec: {
     name: "http_request",
     description:
@@ -28,8 +29,8 @@ export const httpRequestTool: Tool = {
     },
   },
   async run(input, _ctx) {
-    const tid = setTimeout(() => controller.abort(), input.timeout_ms ?? 30_000);
     const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), input.timeout_ms ?? 30_000);
 
     try {
       const res = await fetch(input.url as string, {
