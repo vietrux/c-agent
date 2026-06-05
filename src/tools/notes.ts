@@ -53,7 +53,7 @@ export const notesTool: Tool = {
         name: "notes",
         preview: "clear ALL notes (irreversible)",
       });
-      if (d === "deny") return { text: "✗ denied by user", isError: true };
+      if (d.decision === "deny") return { text: "✗ denied by user", isError: true };
     }
 
     const notes = await load();

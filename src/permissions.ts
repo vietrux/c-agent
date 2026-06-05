@@ -27,7 +27,7 @@ function ruleTarget(tool: string, input: any): string {
 
 /** Parse `Tool` or `Tool(spec)`. spec uses `*` wildcards; `:*` means prefix. */
 function parseRule(raw: string): Rule | null {
-  const m = raw.match(/^([A-Za-z_][\w]*)(?:\((.*)\))?$/);
+  const m = raw.match(/^([A-Za-z_][\w]*)(?:\((.*)\))?$/s);
   if (!m) return null;
   const tool = m[1].toLowerCase();
   const spec = m[2];
@@ -52,11 +52,57 @@ function matches(rules: Rule[], tool: string, input: any): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Per-command rule suggestion (bash only)
+// ---------------------------------------------------------------------------
+
+export interface RuleSuggestion {
+  /** Permission-rule spec string, e.g. "bash(git commit:*)". */
+  spec: string;
+  /** Short human label shown in the "Always allow …" option. */
+  label: string;
+}
+
+/**
+ * Shells/wrappers whose first word would make a prefix rule equivalent to
+ * allowing arbitrary code. Never suggest a reusable prefix for these.
+ */
+const BARE_SHELL_PREFIXES = new Set([
+  "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "dash",
+  "cmd", "powershell", "pwsh",
+  "env", "xargs", "nice", "stdbuf", "nohup", "timeout", "time",
+  "sudo", "doas", "pkexec",
+]);
+
+/** Matches a real subcommand token: lowercase alpha+digits, optional hyphens. */
+const SUBCMD_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+
+/**
+ * Extract a stable 2-word prefix ("git commit", "npm run") from a command.
+ * Returns null when no clean subcommand is present (flags, paths, numbers).
+ * Mirrors Claude Code's getSimpleCommandPrefix: conservative backend logic,
+ * avoids broad rules like `rm:*` or `ls:*`.
+ */
+function simpleCommandPrefix(command: string): string | null {
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  // Leading env-var assignment (VAR=val) → not matchable as a prefix, bail.
+  if (/^[A-Za-z_]\w*=/.test(tokens[0]!)) return null;
+  const cmd = tokens[0]!;
+  const sub = tokens[1]!;
+  if (!SUBCMD_RE.test(cmd) || BARE_SHELL_PREFIXES.has(cmd)) return null;
+  if (!SUBCMD_RE.test(sub)) return null; // flag / path / number / filename
+  return `${cmd} ${sub}`;
+}
+
+// ---------------------------------------------------------------------------
+
 export class PermissionEngine {
   mode: Mode;
   private allow: Rule[];
   private deny: Rule[];
-  private sessionAllow = new Set<string>(); // tool names granted "always" this session
+  /** Rules granted "always" this session (per-command or per-tool). */
+  private sessionAllow: Rule[] = [];
 
   constructor(settings: PermissionSettings, mode?: Mode) {
     this.allow = (settings.allow ?? []).map(parseRule).filter(Boolean) as Rule[];
@@ -64,8 +110,58 @@ export class PermissionEngine {
     this.mode = mode ?? (MODES.includes(settings.mode as Mode) ? (settings.mode as Mode) : "default");
   }
 
+  /** Grant the whole tool for the rest of this session. */
   grantAlways(tool: string) {
-    this.sessionAllow.add(tool);
+    this.sessionAllow.push({ tool: tool.toLowerCase(), matcher: null });
+  }
+
+  /**
+   * Grant a specific rule (e.g. "bash(git commit:*)") for the rest of this
+   * session. Falls back to a whole-tool grant if the spec can't be parsed.
+   */
+  grantRule(spec: string, toolFallback: string) {
+    const r = parseRule(spec);
+    if (r) {
+      this.sessionAllow.push(r);
+    } else {
+      this.grantAlways(toolFallback);
+    }
+  }
+
+  /**
+   * Suggest a reusable permission rule for this call.
+   * Returns null when no safe per-command rule can be derived (falls back to
+   * whole-tool "always allow" in the caller).
+   *
+   * For bash: derives a 2-word subcommand prefix ("git commit", "npm run")
+   * when possible; otherwise suggests the exact single-line command.
+   * Multiline commands and env-var-prefixed commands return null.
+   */
+  suggestRule(tool: string, input: any): RuleSuggestion | null {
+    if (tool !== "bash") return null;
+
+    const command = String(input?.command ?? "").trim();
+    if (!command || command.includes("\n")) return null;
+
+    // Leading env-var → we can't form a matchable prefix (ruleTarget returns
+    // the raw command; cagent doesn't strip env vars at match time).
+    if (/^[A-Za-z_]\w*=/.test(command)) return null;
+
+    const prefix = simpleCommandPrefix(command);
+    if (prefix) {
+      return {
+        spec: `bash(${prefix}:*)`,
+        label: prefix,
+      };
+    }
+
+    // Exact-command rule: only re-matches that identical invocation, but that
+    // beats granting all of bash. Safe for single-use commands (rm, dd, …).
+    const shortCmd = command.length > 50 ? command.slice(0, 50) + "…" : command;
+    return {
+      spec: `bash(${command})`,
+      label: shortCmd,
+    };
   }
 
   /** Decide allow/deny/ask for a tool call. `risky` = tool mutates state. */
@@ -73,7 +169,7 @@ export class PermissionEngine {
     if (matches(this.deny, tool, input)) return "deny";
     if (this.mode === "bypass") return "allow";
     if (matches(this.allow, tool, input)) return "allow";
-    if (this.sessionAllow.has(tool)) return "allow";
+    if (matches(this.sessionAllow, tool, input)) return "allow";
     if (!risky) return "allow";
 
     // risky from here

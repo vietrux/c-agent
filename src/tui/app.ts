@@ -25,7 +25,7 @@ import { Agent, AgentEvents } from "../agent.js";
 import type { Provider } from "../provider/types.js";
 import type { ProcessManager, ProcRecord } from "../process/manager.js";
 import { Session, stripInjected, type SessionData } from "../session.js";
-import type { Decision } from "../tools/registry.js";
+import type { ConfirmRequest, ConfirmResult } from "../tools/registry.js";
 import type { PermissionEngine } from "../permissions.js";
 import { MODES } from "../permissions.js";
 import type { FileCheckpointer } from "../checkpoint.js";
@@ -91,13 +91,13 @@ export class App {
   // ---- tool-facing prompts (exposed to the registry) ----------------------
 
   /** Approve/deny a risky tool call via an in-flow prompt. */
-  confirm = (req: { name: string; preview: string }): Promise<Decision> =>
+  confirm = (req: ConfirmRequest): Promise<ConfirmResult> =>
     this.slot.exclusive(
       () =>
-        new Promise<Decision>((resolve) => {
-          const prompt = new PermissionPrompt(req.name, req.preview, (d) => {
+        new Promise<ConfirmResult>((resolve) => {
+          const prompt = new PermissionPrompt(req, (r) => {
             this.slot.restore();
-            resolve(d);
+            resolve(r);
           });
           this.slot.swap(prompt);
         }),

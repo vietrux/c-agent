@@ -1,9 +1,11 @@
 import { ProcessManager } from "../process/manager.js";
 import type { ToolSpec } from "../provider/types.js";
-import type { PermissionEngine } from "../permissions.js";
+import type { PermissionEngine, RuleSuggestion } from "../permissions.js";
 import type { FileCheckpointer } from "../checkpoint.js";
 import type { Skill } from "../skills.js";
 import type { HookRunner } from "../hooks.js";
+import type { ConsultantConfig } from "../settings.js";
+import type { UndercoverState } from "../utils/redact.js";
 
 export interface TodoItem {
   text: string;
@@ -12,9 +14,20 @@ export interface TodoItem {
 
 export type Decision = "allow" | "always" | "deny";
 
+export interface ConfirmResult {
+  decision: Decision;
+  /** User's optional reason when denying — returned to the model as context. */
+  feedback?: string;
+}
+
 export interface ConfirmRequest {
   name: string;
   preview: string;
+  /**
+   * Per-command/per-target rule to grant on "always". null = grant whole tool.
+   * Populated by the engine's suggestRule() for bash; absent for other tools.
+   */
+  suggestion?: RuleSuggestion | null;
 }
 
 export interface ToolContext {
@@ -24,7 +37,7 @@ export interface ToolContext {
   /** Ask the user a question via the TUI; resolves with their typed answer. */
   ask?: (question: string) => Promise<string>;
   /** Ask the user to approve a risky tool call. Absent = auto-approve (yolo). */
-  confirm?: (req: ConfirmRequest) => Promise<Decision>;
+  confirm?: (req: ConfirmRequest) => Promise<ConfirmResult>;
   /** Permission rules + mode. Absent = legacy confirm-only behavior. */
   engine?: PermissionEngine;
   /** Snapshots file state before mutations so rewind can restore it. */
@@ -35,6 +48,10 @@ export interface ToolContext {
   spawn?: (prompt: string, agentType?: string) => Promise<string>;
   /** Lifecycle shell hooks (PreToolUse / PostToolUse). */
   hooks?: HookRunner;
+  /** Config for the external-consultant (`ask_claude`) tool. */
+  consultant?: ConsultantConfig;
+  /** Undercover (PII-masking) state — `ask_claude` warns when this is on. */
+  undercover?: UndercoverState;
 }
 
 export interface ToolResult {
@@ -118,12 +135,20 @@ export function validateToolInput(schema: any, input: any): string | null {
 function previewOf(name: string, input: any): string {
   if (input?.command) return String(input.command);
   if (input?.path) return String(input.path);
+  // ask_claude: surface the question being sent off-machine to an external model.
+  if (input?.problem) return `→ external Claude: ${String(input.problem).slice(0, 160)}`;
   if (input?.id) return String(input.id);
   try {
     return JSON.stringify(input ?? {}).slice(0, 200);
   } catch {
     return name;
   }
+}
+
+/** Build the tool error text for a user denial, including optional feedback. */
+function deniedText(feedback?: string): string {
+  if (!feedback?.trim()) return "✗ denied by user";
+  return `✗ denied by user\nUser feedback: ${feedback.trim()}`;
 }
 
 export class ToolRegistry {
@@ -184,22 +209,27 @@ export class ToolRegistry {
       if (verdict === "ask") {
         if (!ctx.confirm)
           return { text: "✗ denied (no approval channel)", isError: true };
-        const decision = await ctx.confirm({
+        const suggestion = ctx.engine.suggestRule(name, input);
+        const result = await ctx.confirm({
           name,
           preview: previewOf(name, input),
+          suggestion,
         });
-        if (decision === "deny")
-          return { text: "✗ denied by user", isError: true };
-        if (decision === "always") ctx.engine.grantAlways(name);
+        if (result.decision === "deny")
+          return { text: deniedText(result.feedback), isError: true };
+        if (result.decision === "always") {
+          if (suggestion) ctx.engine.grantRule(suggestion.spec, name);
+          else ctx.engine.grantAlways(name);
+        }
       }
     } else if (t.risky && !this.allowed.has(name) && ctx.confirm) {
-      const decision = await ctx.confirm({
+      const result = await ctx.confirm({
         name,
         preview: previewOf(name, input),
       });
-      if (decision === "deny")
-        return { text: "✗ denied by user", isError: true };
-      if (decision === "always") this.allowed.add(name);
+      if (result.decision === "deny")
+        return { text: deniedText(result.feedback), isError: true };
+      if (result.decision === "always") this.allowed.add(name);
     }
 
     if (ctx.hooks?.has("PreToolUse")) {
