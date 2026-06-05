@@ -48,9 +48,13 @@ export class PermissionPrompt extends Container {
 
     this.list = new SelectList(
       [
-        { value: "allow",  label: "Allow once",   description: "Run this call" },
-        { value: "always", label: alwaysLabel,     description: "Don't ask again this session" },
-        { value: "deny",   label: "Deny",          description: "Reject — Tab to add reason" },
+        { value: "allow", label: "Allow once", description: "Run this call" },
+        {
+          value: "always",
+          label: alwaysLabel,
+          description: "Don't ask again this session",
+        },
+        { value: "deny", label: "Deny", description: "Reject" },
       ],
       3,
       selectListTheme,
