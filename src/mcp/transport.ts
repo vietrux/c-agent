@@ -1,7 +1,13 @@
 import { spawn, ChildProcess } from "node:child_process";
 import type { McpServerConfig } from "../settings.js";
+import { subprocessEnv } from "../utils/subprocess-env.js";
 
 export type Frame = Record<string, any>;
+
+// Hard ceiling on a single un-delimited frame. An MCP server (often third-party)
+// that streams without a newline / SSE boundary would otherwise grow our buffer
+// without bound → memory-exhaustion DoS. 16 MB is far above any real frame.
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 /**
  * Moves JSON-RPC frames to/from a server. The client owns id-correlation; a
@@ -39,11 +45,16 @@ class StdioTransport implements Transport {
     if (!this.cfg.command) throw new Error(`mcp ${this.name}: stdio transport needs "command"`);
     const child = spawn(this.cfg.command, this.cfg.args ?? [], {
       cwd: this.cfg.cwd,
-      env: { ...process.env, ...(this.cfg.env ?? {}) },
+      // Scrub provider/cloud secrets from the server's env; server-specific vars
+      // from config still apply on top.
+      env: { ...subprocessEnv(), ...(this.cfg.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
     child.stdin?.on("error", () => {}); // ignore EPIPE if server dies mid-write
+    // Drain stderr — an undrained pipe fills the ~64KB OS buffer and DEADLOCKS
+    // the server on its next stderr write. We don't parse it.
+    child.stderr?.on("data", () => {});
     child.on("error", (e) => this.onClose(e));
     child.on("exit", (code) => this.onClose(code ? new Error(`exited code ${code}`) : undefined));
     child.stdout?.on("data", (c: Buffer) => this.feed(c.toString("utf8")));
@@ -61,6 +72,14 @@ class StdioTransport implements Transport {
       } catch {
         /* non-JSON line (server stray output) — ignore */
       }
+    }
+    // A partial line larger than the cap means a runaway/oversized frame — tear
+    // the connection down instead of buffering unboundedly.
+    if (this.buf.length > MAX_FRAME_BYTES) {
+      this.buf = "";
+      const err = new Error(`mcp ${this.name}: oversized stdout frame (> ${MAX_FRAME_BYTES} bytes)`);
+      this.onClose(err);
+      this.close();
     }
   }
 
@@ -137,6 +156,16 @@ class HttpTransport implements Transport {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
+      if (buf.length > MAX_FRAME_BYTES) {
+        // Runaway stream with no event boundary — stop reading.
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        this.onClose(new Error(`mcp ${this.name}: oversized SSE frame (> ${MAX_FRAME_BYTES} bytes)`));
+        return;
+      }
       let sep: number;
       // events separated by blank line; data may span multiple `data:` lines
       while ((sep = buf.indexOf("\n\n")) >= 0) {

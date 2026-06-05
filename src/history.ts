@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { writeSecureFile } from "./utils/secure-fs.js";
 
 // Bash-style input history: every submitted line is appended, recalled with
 // up/down in the editor, and persisted across launches. Stored newline-
@@ -34,8 +35,7 @@ export function pushHistory(line: string): void {
   h.push(t);
   if (h.length > MAX) h.splice(0, h.length - MAX);
   try {
-    mkdirSync(DIR, { recursive: true });
-    writeFileSync(FILE, h.join("\n") + "\n", { mode: 0o600 });
+    writeSecureFile(FILE, h.join("\n") + "\n");
   } catch {
     /* history is best-effort; ignore write failures */
   }

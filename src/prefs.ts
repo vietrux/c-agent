@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { writeSecureFile } from "./utils/secure-fs.js";
 
 const FILE = join(homedir(), ".c-agent", "state.json");
 
@@ -21,8 +22,7 @@ export function loadPrefs(): Prefs {
 
 export function savePrefs(p: Prefs): void {
   try {
-    mkdirSync(join(homedir(), ".c-agent"), { recursive: true });
-    writeFileSync(FILE, JSON.stringify(p), "utf8");
+    writeSecureFile(FILE, JSON.stringify(p));
   } catch {
     /* best effort */
   }

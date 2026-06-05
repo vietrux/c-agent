@@ -19,6 +19,8 @@ import { loadAgentDefs } from "./subagents.js";
 import { HookRunner } from "./hooks.js";
 import { RedactingProvider } from "./provider/redacting.js";
 import { Vault, type UndercoverState } from "./utils/redact.js";
+import { registerScrubVars } from "./utils/subprocess-env.js";
+import { diag } from "./utils/audit.js";
 
 const NOOP_EVENTS: AgentEvents = {
   reasoningDelta() {},
@@ -53,6 +55,11 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function main() {
+  // Last-resort crash guards: log diagnostics (no PII) and keep the TUI alive
+  // instead of letting an async fault tear down the session.
+  process.on("unhandledRejection", (reason) => diag("unhandledRejection", reason));
+  process.on("uncaughtException", (err) => diag("uncaughtException", err));
+
   try {
     process.loadEnvFile(".env");
   } catch {
@@ -63,6 +70,13 @@ async function main() {
   const cwd = process.cwd();
 
   const settings = loadSettings(cwd);
+
+  // Scrub configured provider key env-vars (apiKeyEnv) from child processes too,
+  // on top of the built-in secret list.
+  registerScrubVars([
+    settings.provider?.apiKeyEnv,
+    ...Object.values(settings.providers).map((p) => p.apiKeyEnv),
+  ]);
   const store = new SessionStore(cwd);
 
   // Build the set of selectable providers: the env default (e.g. NIM) plus any

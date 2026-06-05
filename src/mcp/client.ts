@@ -2,6 +2,7 @@ import type { McpServerConfig } from "../settings.js";
 import { makeTransport, type Transport, type Frame } from "./transport.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
+const MAX_PAGES = 1000; // pagination safety bound (see paginate)
 
 export interface McpTool {
   name: string;
@@ -122,7 +123,13 @@ export class McpClient {
   private async paginate<T>(method: string, key: string): Promise<T[]> {
     const out: T[] = [];
     let cursor: string | undefined;
+    let pages = 0;
     do {
+      // Bound pages: a buggy/malicious server returning a constant nextCursor
+      // would otherwise loop forever (DoS).
+      if (++pages > MAX_PAGES) {
+        throw new Error(`mcp ${this.name} ${method}: exceeded ${MAX_PAGES} pages`);
+      }
       const res = await this.request(method, cursor ? { cursor } : {});
       if (Array.isArray(res?.[key])) out.push(...res[key]);
       cursor = res?.nextCursor;

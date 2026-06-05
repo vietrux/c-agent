@@ -1,7 +1,9 @@
 import { spawn, ChildProcess } from "node:child_process";
-import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
+import { createWriteStream, type WriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { ensureSecureDir } from "../utils/secure-fs.js";
+import { subprocessEnv } from "../utils/subprocess-env.js";
 
 export interface ProcRecord {
   id: string;
@@ -94,7 +96,7 @@ export class ProcessManager {
   private startFileLog(rec: ProcRecord) {
     if (rec.logStream) return;
     try {
-      mkdirSync(TASKS_DIR, { recursive: true });
+      ensureSecureDir(TASKS_DIR);
       const path = join(TASKS_DIR, `${rec.id}.log`);
       const stream = createWriteStream(path, { flags: "a", mode: 0o600 });
       rec.logPath = path;
@@ -167,7 +169,7 @@ export class ProcessManager {
     const child = spawn(command, {
       cwd,
       shell: true,
-      env: process.env,
+      env: subprocessEnv(), // strip provider/cloud secrets from the child
       detached: true, // own process group → group-kill reaches grandchildren
     });
 

@@ -1,14 +1,9 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import {
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-  existsSync,
-} from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { Session, type SessionData } from "./session.js";
+import { ensureSecureDir, writeSecureFile } from "./utils/secure-fs.js";
 
 const ROOT = join(homedir(), ".c-agent", "sessions");
 
@@ -26,7 +21,7 @@ export class SessionStore {
 
   /** Persist a session and wire it to autosave on every change. */
   attach(session: Session) {
-    mkdirSync(this.dir, { recursive: true });
+    ensureSecureDir(this.dir);
     session.onChange = () => this.save(session);
     this.save(session);
   }
@@ -34,7 +29,7 @@ export class SessionStore {
   save(session: Session) {
     if (session.messages.length === 0) return; // don't litter empty sessions
     const file = join(this.dir, `${session.id}.json`);
-    writeFileSync(file, JSON.stringify(session.toData()), "utf8");
+    writeSecureFile(file, JSON.stringify(session.toData())); // 0600 — may hold PII/secrets
   }
 
   load(id: string): Session | null {

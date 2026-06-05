@@ -1,7 +1,8 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { Tool } from "./registry.js";
+import { writeSecureFile } from "../utils/secure-fs.js";
 
 const NOTES_DIR = join(homedir(), ".c-agent");
 const NOTES_FILE = join(NOTES_DIR, "notes.json");
@@ -15,8 +16,7 @@ async function load(): Promise<Record<string, string>> {
 }
 
 async function save(notes: Record<string, string>): Promise<void> {
-  await mkdir(NOTES_DIR, { recursive: true });
-  await writeFile(NOTES_FILE, JSON.stringify(notes, null, 2), "utf8");
+  writeSecureFile(NOTES_FILE, JSON.stringify(notes, null, 2)); // 0600 — may hold credentials
 }
 
 export const notesTool: Tool = {

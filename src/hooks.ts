@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { HookConfig, HookDef, HookEvent } from "./settings.js";
+import { subprocessEnv } from "./utils/subprocess-env.js";
 
 export interface HookOutcome {
   block: boolean; // PreToolUse: deny the action
@@ -15,7 +16,7 @@ function runCommand(
   payload: unknown,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, { shell: true, env: process.env });
+    const child = spawn(command, { shell: true, env: subprocessEnv() });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGTERM"), HOOK_TIMEOUT_MS);

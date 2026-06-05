@@ -5,6 +5,7 @@ import type { FileCheckpointer } from "../checkpoint.js";
 import type { Skill } from "../skills.js";
 import type { HookRunner } from "../hooks.js";
 import { capToolResult } from "./result-cap.js";
+import { audit } from "../utils/audit.js";
 
 export interface TodoItem {
   text: string;
@@ -211,20 +212,25 @@ export class ToolRegistry {
     if (!t) return { text: `unknown tool: ${name}`, isError: true };
     if (signal?.aborted) return { text: "✗ interrupted", isError: true };
 
+    const preview = previewOf(name, input);
+
     // Validate the model-supplied arguments against the tool's schema before
     // doing anything (permission prompts, side effects). A clear error lets the
     // model self-correct instead of the tool blowing up on garbage input.
     const invalid = validateToolInput(t.spec.parameters, input);
-    if (invalid)
+    if (invalid) {
+      audit({ tool: name, decision: "invalid-args", preview, isError: true });
       return {
         text: `✗ invalid arguments for ${name}: ${invalid}`,
         isError: true,
       };
+    }
 
     // A call proven read-only (e.g. `bash ls`) is downgraded from risky → not
     // risky, so it skips the prompt like read/grep. User `deny` rules still
     // apply (the engine checks deny before this flag).
     const risky = isCallReadOnly(t, input) ? false : (t.risky ?? false);
+    let decision = "allow"; // refined below; recorded in the audit trail
 
     if (ctx.engine) {
       const verdict = ctx.engine.evaluate(name, input, risky);
@@ -233,44 +239,58 @@ export class ToolRegistry {
           ctx.engine.mode === "plan" && risky
             ? " (plan mode — no mutations)"
             : "";
+        audit({ tool: name, decision: "denied", preview, isError: true });
         return { text: `✗ denied${why}`, isError: true };
       }
       if (verdict === "ask") {
-        if (!ctx.confirm)
+        if (!ctx.confirm) {
+          audit({ tool: name, decision: "denied-no-channel", preview, isError: true });
           return { text: "✗ denied (no approval channel)", isError: true };
+        }
         const suggestion = ctx.engine.suggestRule(name, input);
         const result = await ctx.confirm({
           name,
-          preview: previewOf(name, input),
+          preview,
           suggestion,
         });
-        if (result.decision === "deny")
+        if (result.decision === "deny") {
+          audit({ tool: name, decision: "user-denied", preview, isError: true });
           return { text: deniedText(result.feedback), isError: true };
+        }
         if (result.decision === "always") {
           if (suggestion) ctx.engine.grantRule(suggestion.spec, name);
           else ctx.engine.grantAlways(name);
+          decision = "user-always";
+        } else {
+          decision = "user-allow";
         }
       }
     } else if (risky && !this.allowed.has(name) && ctx.confirm) {
       const result = await ctx.confirm({
         name,
-        preview: previewOf(name, input),
+        preview,
       });
-      if (result.decision === "deny")
+      if (result.decision === "deny") {
+        audit({ tool: name, decision: "user-denied", preview, isError: true });
         return { text: deniedText(result.feedback), isError: true };
+      }
       if (result.decision === "always") this.allowed.add(name);
+      decision = result.decision === "always" ? "user-always" : "user-allow";
     }
 
     if (ctx.hooks?.has("PreToolUse")) {
       const r = await ctx.hooks.run("PreToolUse", { tool: name, input }, name);
-      if (r.block)
+      if (r.block) {
+        audit({ tool: name, decision: "hook-blocked", preview, isError: true });
         return { text: `✗ blocked by hook: ${r.reason}`, isError: true };
+      }
     }
 
     let result: ToolResult;
     try {
       result = await t.run(input, ctx, signal);
     } catch (err: any) {
+      audit({ tool: name, decision, preview, isError: true });
       return {
         text: `tool ${name} failed: ${err?.message ?? String(err)}`,
         isError: true,
@@ -286,6 +306,8 @@ export class ToolRegistry {
       if (r.context)
         result = { ...result, text: `${result.text}\n\n[hook]\n${r.context}` };
     }
+
+    audit({ tool: name, decision, preview, isError: result.isError });
 
     // Cap the model-facing result: oversized output spills to disk with a
     // preview + path instead of silently dropping content.
