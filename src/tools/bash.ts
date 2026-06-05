@@ -1,4 +1,5 @@
 import type { Tool } from "./registry.js";
+import { isReadOnlyBashCommand } from "./bash-classifier.js";
 
 // Commands that should never be auto-backgrounded on timeout: a slow `sleep`
 // is almost always meant to block, so killing it is the right call.
@@ -13,6 +14,11 @@ function autoBackgroundAllowed(command: string): boolean {
 
 export const bashTool: Tool = {
   risky: true,
+  // Provably read-only invocations (`ls`, `cat`, `grep`, `git log`, …) are
+  // downgraded: they skip the prompt and may run concurrently. Conservative —
+  // anything with a redirect/pipe/chain/substitution stays risky. Deny rules
+  // still apply. See bash-classifier.ts for the security model.
+  readOnly: (input) => isReadOnlyBashCommand(String(input?.command ?? "")),
   spec: {
     name: "bash",
     description:

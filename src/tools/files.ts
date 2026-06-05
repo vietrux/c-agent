@@ -33,6 +33,9 @@ function abs(cwd: string, p: string): string {
 
 export const readTool: Tool = {
   concurrencySafe: true,
+  // Never spill read output to disk — it already self-bounds by line count, and
+  // persisting would create a read→file→read loop.
+  maxResultChars: Infinity,
   spec: {
     name: "read",
     description:

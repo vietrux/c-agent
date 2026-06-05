@@ -50,7 +50,9 @@ Length anchors (defaults, not hard limits — exceed only when the task truly ne
 ${BEHAVIOR_GUIDANCE_C || ""}`;
 
 const MAX_STEPS = 100;
-const MAX_TOOL_RESULT = 64_000; // chars of tool output fed back to the model
+// Cap on how many concurrency-safe tool calls run at once, so a turn that emits
+// dozens of read/grep calls can't spawn an unbounded burst of work.
+const MAX_TOOL_CONCURRENCY = Number(process.env.C_AGENT_MAX_TOOL_CONCURRENCY) || 10;
 
 // Context budget (in tokens, ~4 chars each). Compact when the transcript estimate
 // crosses COMPACT_RATIO of the budget, keeping the most recent turns verbatim.
@@ -130,12 +132,17 @@ Output ONLY the note, wrapped in <summary> tags, with these sections:
 
 No preamble, no commentary outside the <summary> tags.`;
 
-/** Keep head+tail so both the command echo and the tail of long output survive. */
-function capResult(text: string): string {
-  if (text.length <= MAX_TOOL_RESULT) return text;
-  const head = text.slice(0, Math.floor(MAX_TOOL_RESULT * 0.6));
-  const tail = text.slice(-Math.floor(MAX_TOOL_RESULT * 0.3));
-  return `${head}\n… [${text.length - head.length - tail.length} chars truncated] …\n${tail}`;
+/** Run thunks with a bounded number in flight at once, preserving no order. */
+async function runPool(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const i = next++;
+      await tasks[i]();
+    }
+  };
+  const n = Math.min(Math.max(1, limit), tasks.length);
+  await Promise.all(Array.from({ length: n }, worker));
 }
 
 export class Agent {
@@ -461,24 +468,26 @@ export class Agent {
       ev.toolEnd(tc.id, res.text, res.isError ?? false);
       results[i] = {
         id: tc.id,
-        content: capResult(res.text),
+        content: res.text, // already capped/spilled by the registry
         isError: res.isError ?? false,
       };
     };
 
     let i = 0;
     while (i < toolCalls.length) {
-      if (this.registry.isConcurrencySafe(toolCalls[i].name)) {
-        // Batch consecutive read-only calls and run them together.
-        const batch: Promise<void>[] = [];
+      if (this.registry.isConcurrencySafe(toolCalls[i].name, toolCalls[i].input)) {
+        // Batch consecutive read-only calls and run them with bounded concurrency.
+        const thunks: (() => Promise<void>)[] = [];
         while (
           i < toolCalls.length &&
-          this.registry.isConcurrencySafe(toolCalls[i].name)
+          this.registry.isConcurrencySafe(toolCalls[i].name, toolCalls[i].input)
         ) {
-          batch.push(runOne(toolCalls[i], i));
+          const tc = toolCalls[i];
+          const idx = i;
+          thunks.push(() => runOne(tc, idx));
           i++;
         }
-        await Promise.all(batch);
+        await runPool(thunks, MAX_TOOL_CONCURRENCY);
       } else {
         // A write/exec call runs alone, to completion, before the next call.
         await runOne(toolCalls[i], i);

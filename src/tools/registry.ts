@@ -4,6 +4,7 @@ import type { PermissionEngine, RuleSuggestion } from "../permissions.js";
 import type { FileCheckpointer } from "../checkpoint.js";
 import type { Skill } from "../skills.js";
 import type { HookRunner } from "../hooks.js";
+import { capToolResult } from "./result-cap.js";
 
 export interface TodoItem {
   text: string;
@@ -63,8 +64,32 @@ export interface Tool {
    * write/exec tools run serially so parallel calls can't corrupt shared state.
    */
   concurrencySafe?: boolean;
+  /**
+   * Per-input override: return true when THIS specific call is provably
+   * side-effect-free (e.g. `bash ls` vs `bash rm`). A true result both marks the
+   * call concurrency-safe AND downgrades `risky` to false (skips the permission
+   * prompt). SECURITY: only return true when certain — a wrong true lets a
+   * mutating call run unapproved. May throw; callers treat a throw as "not safe".
+   */
+  readOnly?(input: any): boolean;
+  /**
+   * Max chars of this tool's result fed to the model before the full output is
+   * spilled to disk and replaced with a preview + path. Default 64k. Use
+   * Infinity for tools whose output must never be persisted (e.g. read).
+   */
+  maxResultChars?: number;
   /** `signal` aborts on Esc/interrupt — long in-process tools (glob) honor it. */
   run(input: any, ctx: ToolContext, signal?: AbortSignal): Promise<ToolResult>;
+}
+
+/** True if this specific call is provably read-only. Never throws. */
+function isCallReadOnly(t: Tool, input: any): boolean {
+  if (!t.readOnly) return false;
+  try {
+    return t.readOnly(input) === true;
+  } catch {
+    return false; // classifier error → treat as NOT read-only (conservative)
+  }
 }
 
 function jsonType(v: any): string {
@@ -164,9 +189,16 @@ export class ToolRegistry {
     return [...this.tools.values()].map((t) => t.spec);
   }
 
-  /** True if the named tool is read-only/side-effect-free → safe to parallelize. */
-  isConcurrencySafe(name: string): boolean {
-    return this.tools.get(name)?.concurrencySafe ?? false;
+  /**
+   * True if the named call is side-effect-free → safe to parallelize. Checks the
+   * per-input `readOnly` predicate first (e.g. `bash ls`), then the static
+   * `concurrencySafe` flag.
+   */
+  isConcurrencySafe(name: string, input?: any): boolean {
+    const t = this.tools.get(name);
+    if (!t) return false;
+    if (isCallReadOnly(t, input)) return true;
+    return t.concurrencySafe ?? false;
   }
 
   async dispatch(
@@ -189,11 +221,16 @@ export class ToolRegistry {
         isError: true,
       };
 
+    // A call proven read-only (e.g. `bash ls`) is downgraded from risky → not
+    // risky, so it skips the prompt like read/grep. User `deny` rules still
+    // apply (the engine checks deny before this flag).
+    const risky = isCallReadOnly(t, input) ? false : (t.risky ?? false);
+
     if (ctx.engine) {
-      const verdict = ctx.engine.evaluate(name, input, t.risky ?? false);
+      const verdict = ctx.engine.evaluate(name, input, risky);
       if (verdict === "deny") {
         const why =
-          ctx.engine.mode === "plan" && (t.risky ?? false)
+          ctx.engine.mode === "plan" && risky
             ? " (plan mode — no mutations)"
             : "";
         return { text: `✗ denied${why}`, isError: true };
@@ -214,7 +251,7 @@ export class ToolRegistry {
           else ctx.engine.grantAlways(name);
         }
       }
-    } else if (t.risky && !this.allowed.has(name) && ctx.confirm) {
+    } else if (risky && !this.allowed.has(name) && ctx.confirm) {
       const result = await ctx.confirm({
         name,
         preview: previewOf(name, input),
@@ -249,6 +286,12 @@ export class ToolRegistry {
       if (r.context)
         result = { ...result, text: `${result.text}\n\n[hook]\n${r.context}` };
     }
-    return result;
+
+    // Cap the model-facing result: oversized output spills to disk with a
+    // preview + path instead of silently dropping content.
+    return {
+      ...result,
+      text: capToolResult(result.text, t.maxResultChars),
+    };
   }
 }
