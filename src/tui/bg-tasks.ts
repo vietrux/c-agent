@@ -52,7 +52,8 @@ export class BgTasks {
     this.queue.push({
       content:
         `Background task [${rec.id}] \`${rec.command}\` finished (${status}).` +
-        (tail ? `\nLast output:\n${tail}` : ""),
+        (tail ? `\nLast output:\n${tail}` : "") +
+        (rec.logPath ? `\nFull output log: ${rec.logPath}` : ""),
       notify: rec.notify,
     });
     if (rec.notify) this.scheduleDrain();

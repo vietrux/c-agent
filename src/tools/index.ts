@@ -1,5 +1,5 @@
 import { ToolRegistry } from "./registry.js";
-import { bashTool, procListTool, procTailTool, procKillTool } from "./bash.js";
+import { bashTool, procListTool, procReadTool, procTailTool, procKillTool } from "./bash.js";
 import { readTool, writeTool, editTool, multiEditTool, globTool, grepTool } from "./files.js";
 import { todoTool, askTool } from "./meta.js";
 import { httpRequestTool } from "./http.js";
@@ -11,6 +11,7 @@ export function buildRegistry(): ToolRegistry {
   for (const t of [
     bashTool,
     procListTool,
+    procReadTool,
     procTailTool,
     procKillTool,
     readTool,

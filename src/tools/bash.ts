@@ -1,5 +1,16 @@
 import type { Tool } from "./registry.js";
 
+// Commands that should never be auto-backgrounded on timeout: a slow `sleep`
+// is almost always meant to block, so killing it is the right call.
+const NO_AUTO_BACKGROUND = new Set(["sleep"]);
+
+/** Auto-background a long foreground command unless it's disallowed or disabled. */
+function autoBackgroundAllowed(command: string): boolean {
+  if (process.env.C_AGENT_DISABLE_BG) return false;
+  const base = command.trim().split(/\s+/)[0]?.split("/").pop() ?? "";
+  return !NO_AUTO_BACKGROUND.has(base);
+}
+
 export const bashTool: Tool = {
   risky: true,
   spec: {
@@ -11,7 +22,9 @@ export const bashTool: Tool = {
       "Quote any path containing spaces. Do not use interactive flags (e.g. -i) or commands that " +
       "need a TTY. Avoid scanning the whole filesystem (no `find /`). " +
       "Set background=true for long-running processes (servers, watchers): it returns a proc id " +
-      "immediately — manage it via proc_tail / proc_list / proc_kill. " +
+      "immediately — follow it with proc_read, or manage it via proc_list / proc_tail / proc_kill. " +
+      "A foreground command that exceeds timeout_ms is moved to the background automatically " +
+      "(except `sleep`) and keeps running — you are notified when it finishes. " +
       "Never commit or push with git unless the user explicitly asked.",
     parameters: {
       type: "object",
@@ -29,27 +42,36 @@ export const bashTool: Tool = {
         },
         timeout_ms: {
           type: "number",
-          description: "Foreground kill timeout in ms (default 120000)",
+          description: "Foreground budget in ms before auto-backgrounding (default 120000)",
         },
       },
       required: ["command"],
     },
   },
   async run(input, ctx) {
+    const background = input.background === true;
     const r = await ctx.pm.run({
       command: input.command,
       cwd: ctx.cwd,
-      background: input.background === true,
+      background,
       notify: input.notify === true,
       timeoutMs: input.timeout_ms ?? 120_000,
+      autoBackground: !background && autoBackgroundAllowed(input.command),
     });
+
     if (r.background) {
+      const logHint = r.outputPath ? ` Full log on disk: ${r.outputPath}.` : "";
+      const head = r.autoBackgrounded
+        ? `[${r.id}] exceeded the ${(input.timeout_ms ?? 120_000) / 1000}s foreground budget and was ` +
+          `moved to the background — still running. You'll be notified when it finishes.`
+        : `[${r.id}] started in background (running=${r.running}).`;
       return {
         text:
-          `[${r.id}] started in background (running=${r.running}).\n` +
+          `${head} Read new output incrementally with proc_read id=${r.id}.${logHint}\n` +
           `initial output:\n${r.output || "(none yet)"}`,
       };
     }
+
     const status = r.timedOut
       ? `timed out (SIGTERM)`
       : `exit=${r.exitCode}${r.signal ? ` signal=${r.signal}` : ""}`;
@@ -78,11 +100,37 @@ export const procListTool: Tool = {
   },
 };
 
+export const procReadTool: Tool = {
+  concurrencySafe: true,
+  spec: {
+    name: "proc_read",
+    description:
+      "Read NEW output from a process since your last proc_read (incremental cursor — repeated " +
+      "calls never re-show the same lines). Optional regex filter keeps only matching lines. Use " +
+      "this to follow a background or long-running command. For a full snapshot use proc_tail.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        filter: { type: "string", description: "only return lines matching this regex" },
+      },
+      required: ["id"],
+    },
+  },
+  async run(input, ctx) {
+    const r = ctx.pm.read(input.id, input.filter);
+    if (r === null) return { text: `no such process: ${input.id}`, isError: true };
+    const head = r.dropped > 0 ? `… (${r.dropped} earlier lines dropped from buffer)\n` : "";
+    const tail = r.running ? "" : "\n[process exited]";
+    return { text: head + (r.text || "(no new output)") + tail };
+  },
+};
+
 export const procTailTool: Tool = {
   concurrencySafe: true,
   spec: {
     name: "proc_tail",
-    description: "Get the last N output lines of a process by id.",
+    description: "Get the last N output lines of a process by id (snapshot, not incremental).",
     parameters: {
       type: "object",
       properties: {
@@ -103,7 +151,7 @@ export const procKillTool: Tool = {
   risky: true,
   spec: {
     name: "proc_kill",
-    description: "Kill a running process by id (SIGTERM by default).",
+    description: "Kill a running process (and its whole process group) by id (SIGTERM by default).",
     parameters: {
       type: "object",
       properties: {
