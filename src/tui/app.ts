@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { t } from "./themes.js";
 import { notice, noteBlock, UserMessage } from "./components.js";
-import { RewindSelector, SessionSelector, type RewindItem } from "./selector.js";
+import { RewindSelector, SessionSelector, ListSelector, type RewindItem } from "./selector.js";
 import { PermissionPrompt } from "./permission.js";
 import { AskPrompt } from "./prompts.js";
 import { Footer } from "./footer.js";
@@ -273,6 +273,22 @@ export class App {
     this.slot.swap(selector);
   }
 
+  /** Start a fresh conversation, keeping the current one saved & resumable. */
+  newConversation() {
+    if (this.busy) {
+      this.view.addBlock(notice("can't start a new conversation while the agent is working"));
+      return;
+    }
+    const next = new Session(this.session.cwd);
+    this.store?.attach(next); // re-point autosave at the new session
+    this.agent.setSession(next);
+    this.session = next;
+    this.checkpointer.clear(); // file undo log belongs to the old session
+    this.view.clear();
+    this.view.addSpaced(notice("✦ new conversation"));
+    this.tui.requestRender();
+  }
+
   openResume() {
     if (this.busy) {
       this.view.addBlock(notice("can't resume while the agent is working"));
@@ -282,25 +298,50 @@ export class App {
       this.view.addBlock(notice("session store unavailable"));
       return;
     }
-    const sessions = this.store.list().filter((s) => s.id !== this.session.id);
-    if (sessions.length === 0) {
-      this.view.addBlock(notice("no other sessions for this project"));
-      return;
-    }
-    const items: RewindItem[] = sessions.map((s, i) => ({
-      index: i,
-      label: s.title || "(untitled)",
-      subtitle: `${fmtAgo(s.updatedAt)} · ${s.messages.length} messages`,
-    }));
-    const selector = new SessionSelector(
-      items,
-      (i) => {
+    const show = () => {
+      const sessions = this.store!.list().filter((s) => s.id !== this.session.id);
+      if (sessions.length === 0) {
         this.slot.restore();
-        this.switchSession(sessions[i]);
+        this.view.addBlock(notice("no other sessions for this project"));
+        return;
+      }
+      const items: RewindItem[] = sessions.map((s, i) => ({
+        index: i,
+        label: s.title || "(untitled)",
+        subtitle: `${fmtAgo(s.updatedAt)} · ${s.messages.length} messages`,
+      }));
+      const selector = new SessionSelector(
+        items,
+        (i) => {
+          this.slot.restore();
+          this.switchSession(sessions[i]);
+        },
+        () => this.slot.restore(),
+        (i) => this.confirmDeleteSession(sessions[i], show),
+      );
+      this.slot.swap(selector);
+    };
+    show();
+  }
+
+  /** Confirm + delete a stored session, then re-render the resume picker. */
+  private confirmDeleteSession(s: SessionData, back: () => void) {
+    const name = (s.title || "(untitled)").slice(0, 60);
+    const confirm = new ListSelector(
+      "Delete session?",
+      `"${name}" — can't be undone. ↑/↓ select · Enter confirm · Esc cancel`,
+      [
+        { index: 0, label: "Cancel" },
+        { index: 1, label: "Delete" },
+      ],
+      (i) => {
+        if (i === 1) this.store?.delete(s.id);
+        back();
       },
-      () => this.slot.restore(),
+      () => back(),
+      "first",
     );
-    this.slot.swap(selector);
+    this.slot.swap(confirm);
   }
 
   /** Replace the live transcript with a stored one and re-render it. */
@@ -355,7 +396,7 @@ export class App {
           { name: "bg", description: "List/cancel background tasks" },
           { name: "mcp", description: "Show MCP server status" },
           { name: "context", description: "Show context token usage" },
-          { name: "clear", description: "Clear the conversation" },
+          { name: "new", description: "Start a new conversation" },
           { name: "help", description: "List commands" },
           { name: "exit", description: "Quit" },
         ],

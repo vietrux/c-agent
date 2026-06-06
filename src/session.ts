@@ -126,10 +126,4 @@ export class Session {
     this.checkpoints = checkpoints;
     this.touched();
   }
-
-  clear() {
-    this.messages = [];
-    this.checkpoints = [];
-    this.touched();
-  }
 }

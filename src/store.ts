@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { Session, type SessionData } from "./session.js";
 import { ensureSecureDir, writeSecureFile } from "./utils/secure-fs.js";
 
@@ -30,6 +30,15 @@ export class SessionStore {
     if (session.messages.length === 0) return; // don't litter empty sessions
     const file = join(this.dir, `${session.id}.json`);
     writeSecureFile(file, JSON.stringify(session.toData())); // 0600 — may hold PII/secrets
+  }
+
+  delete(id: string): void {
+    const file = join(this.dir, `${id}.json`);
+    try {
+      if (existsSync(file)) rmSync(file);
+    } catch {
+      /* ignore */
+    }
   }
 
   load(id: string): Session | null {

@@ -11,6 +11,7 @@ export interface CommandHost {
   agent: Agent;
   tui: TUI;
   mcpSummary: string;
+  newConversation(): void;
   openRewind(): void;
   openResume(): void;
   runCompact(): void;
@@ -29,9 +30,8 @@ export function handleCommand(host: CommandHost, line: string): void {
       host.tui.stop();
       process.exit(0);
       break;
-    case "/clear":
-      host.view.clear();
-      host.session.clear();
+    case "/new":
+      host.newConversation();
       break;
     case "/rewind":
       host.openRewind();
@@ -64,7 +64,7 @@ export function handleCommand(host: CommandHost, line: string): void {
     case "/help":
       host.view.addBlock(
         notice(
-          "/resume  /rewind  /compact  /model  /undercover [on|off]  /bg  /mcp  /context  /clear  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
+          "/resume  /rewind  /compact  /model  /undercover [on|off]  /bg  /mcp  /context  /new  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
         ),
       );
       break;

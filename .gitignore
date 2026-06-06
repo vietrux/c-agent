@@ -1,5 +1,6 @@
 node_modules/
 dist/
 dist-bin/
+dist-pkg/
 .env
 .system_prompt.ts

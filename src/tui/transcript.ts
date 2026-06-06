@@ -28,7 +28,7 @@ function compactJson(v: any): string {
 /**
  * Owns the scrolling transcript: the rendered block list, the live
  * assistant/reasoning/tool blocks streamed during a turn, the working loader,
- * and the turn→block-index map that `/rewind` and `/clear` rely on. Knows
+ * and the turn→block-index map that `/rewind` and `/new` rely on. Knows
  * nothing about the agent, providers, or permission engine — it only renders.
  */
 export class TranscriptView {
@@ -98,7 +98,7 @@ export class TranscriptView {
     this.tui.requestRender();
   }
 
-  // ---- turn bookkeeping (for /rewind, /clear) -----------------------------
+  // ---- turn bookkeeping (for /rewind, /new) -------------------------------
 
   /** Mark the current block position as the start of a new user turn. */
   markTurnStart() {

@@ -39,7 +39,15 @@ for (const t of selected) {
   process.stdout.write(`building ${t.name} → ${outfile}\n`);
   const r = spawnSync(
     "bun",
-    ["build", ENTRY, "--compile", `--target=${t.bun}`, "--outfile", outfile],
+    [
+      "build", ENTRY,
+      "--compile",
+      "--bytecode",
+      "--minify",
+      "--sourcemap=none",
+      `--target=${t.bun}`,
+      "--outfile", outfile,
+    ],
     { stdio: "inherit" },
   );
   if (r.status !== 0) {

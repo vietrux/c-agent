@@ -22,6 +22,7 @@ class List implements Component {
   private sel: number;
   onSelect?: (index: number) => void;
   onCancel?: () => void;
+  onDelete?: (index: number) => void;
   constructor(
     private items: RewindItem[],
     private maxVisible = 8,
@@ -82,6 +83,8 @@ class List implements Component {
       this.sel = this.step(this.sel, +1);
     } else if (matchesKey(data, Key.enter)) {
       if (this.selectable(this.sel)) this.onSelect?.(this.items[this.sel].index);
+    } else if (this.onDelete && (data === "d" || data === "D")) {
+      if (this.selectable(this.sel)) this.onDelete(this.items[this.sel].index);
     } else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
       this.onCancel?.();
     }
@@ -198,6 +201,7 @@ export class ListSelector extends Container {
     onSelect: (index: number) => void,
     onCancel: () => void,
     startAt: "first" | "last" = "last",
+    onDelete?: (index: number) => void,
   ) {
     super();
     this.addChild(new Spacer(1));
@@ -209,6 +213,7 @@ export class ListSelector extends Container {
     this.list = new List(items, 8, startAt);
     this.list.onSelect = onSelect;
     this.list.onCancel = onCancel;
+    this.list.onDelete = onDelete;
     this.addChild(this.list);
     this.addChild(new Spacer(1));
     this.addChild(new DynamicBorder());
@@ -221,14 +226,20 @@ export class ListSelector extends Container {
 
 /** Full-width session picker (same layout flow as the rewind selector). */
 export class SessionSelector extends ListSelector {
-  constructor(items: RewindItem[], onSelect: (index: number) => void, onCancel: () => void) {
+  constructor(
+    items: RewindItem[],
+    onSelect: (index: number) => void,
+    onCancel: () => void,
+    onDelete?: (index: number) => void,
+  ) {
     super(
       "Resume session",
-      "Pick a session to load. ↑/↓ select · Enter confirm · Esc cancel",
+      "Pick a session to load. ↑/↓ select · Enter confirm · d delete · Esc cancel",
       items,
       onSelect,
       onCancel,
       "first", // sessions are newest-first → land the cursor on the latest
+      onDelete,
     );
   }
 }
