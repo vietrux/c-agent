@@ -25,14 +25,19 @@ class List implements Component {
   constructor(
     private items: RewindItem[],
     private maxVisible = 8,
+    startAt: "first" | "last" = "last",
   ) {
-    this.sel = this.lastSelectable();
+    this.sel = startAt === "first" ? this.firstSelectable() : this.lastSelectable();
   }
 
   invalidate(): void {}
 
   private selectable(i: number): boolean {
     return !!this.items[i] && !this.items[i].header;
+  }
+  private firstSelectable(): number {
+    for (let i = 0; i < this.items.length; i++) if (this.selectable(i)) return i;
+    return 0;
   }
   private lastSelectable(): number {
     for (let i = this.items.length - 1; i >= 0; i--) if (this.selectable(i)) return i;
@@ -192,6 +197,7 @@ export class ListSelector extends Container {
     items: RewindItem[],
     onSelect: (index: number) => void,
     onCancel: () => void,
+    startAt: "first" | "last" = "last",
   ) {
     super();
     this.addChild(new Spacer(1));
@@ -200,7 +206,7 @@ export class ListSelector extends Container {
     this.addChild(new Spacer(1));
     this.addChild(new DynamicBorder());
     this.addChild(new Spacer(1));
-    this.list = new List(items);
+    this.list = new List(items, 8, startAt);
     this.list.onSelect = onSelect;
     this.list.onCancel = onCancel;
     this.addChild(this.list);
@@ -222,6 +228,7 @@ export class SessionSelector extends ListSelector {
       items,
       onSelect,
       onCancel,
+      "first", // sessions are newest-first → land the cursor on the latest
     );
   }
 }
