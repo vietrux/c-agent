@@ -40,6 +40,10 @@ export class OpenAIProvider implements Provider {
       } else if (m.role === "user") {
         out.push({ role: "user", content: m.content });
       } else if (m.role === "assistant") {
+        // An assistant turn with neither text nor tool calls is invalid wire
+        // (the API requires content or tool_calls); skip it so a transcript
+        // left malformed by an interrupted turn can still be re-sent.
+        if (!m.content && m.toolCalls.length === 0) continue;
         const msg: OpenAI.Chat.ChatCompletionAssistantMessageParam = {
           role: "assistant",
           content: m.content || null,

@@ -262,7 +262,11 @@ export class App {
         if (start !== undefined) this.view.removeFrom(start);
         this.view.truncateTurns(i);
         this.slot.restore();
-        if (text) this.slot.editor.setText(text);
+        // Restore the user's text WITHOUT the system-injected blocks (hook
+        // context, bg updates) — those are re-added on the next submit; leaking
+        // them into the editor would double-inject on resend.
+        const editable = text ? stripInjected(text) : "";
+        if (editable) this.slot.editor.setText(editable);
       },
       () => this.slot.restore(),
     );

@@ -398,6 +398,13 @@ export class Agent {
         throw err;
       }
 
+      // Esc during the stream can resolve (not throw) with a partial/empty
+      // result; treat it as an interrupt and don't commit a malformed turn.
+      if (signal.aborted) {
+        ev.assistantEnd();
+        return ev.interrupted();
+      }
+
       const { text, toolCalls, usage } = result;
       this.usage.input += usage.input;
       this.usage.output += usage.output;
@@ -412,7 +419,10 @@ export class Agent {
       this.lastSentTokens = usage.input;
       this.lastSentMsgCount = sentMsgCount;
       ev.assistantEnd();
-      this.session.push({ role: "assistant", content: text, toolCalls });
+      // Never commit an empty assistant turn (no text, no tool calls): the wire
+      // format requires content or tool_calls set, so it 400s on the next send.
+      if (text || toolCalls.length > 0)
+        this.session.push({ role: "assistant", content: text, toolCalls });
 
       if (toolCalls.length === 0) {
         ev.status(null);

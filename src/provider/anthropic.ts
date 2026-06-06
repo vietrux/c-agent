@@ -27,7 +27,13 @@ export class AnthropicProvider implements Provider {
   }
 
   private toWire(messages: NeutralMessage[]): Anthropic.MessageParam[] {
-    const mapped = messages.map((m): Anthropic.MessageParam => {
+    // Drop empty assistant turns (no text, no tool calls): they map to an empty
+    // content array, which the API rejects. Lets a transcript left malformed by
+    // an interrupted turn still be re-sent.
+    const usable = messages.filter(
+      (m) => !(m.role === "assistant" && !m.content && m.toolCalls.length === 0),
+    );
+    const mapped = usable.map((m): Anthropic.MessageParam => {
       // Notes carry harness context; deliver as a tagged user message.
       if (m.role === "note") {
         return { role: "user", content: `<context>\n${m.content}\n</context>` };
