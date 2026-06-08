@@ -13,6 +13,7 @@ import { RewindSelector, SessionSelector, ListSelector, type RewindItem } from "
 import { PermissionPrompt } from "./permission.js";
 import { AskPrompt } from "./prompts.js";
 import { Footer } from "./footer.js";
+import { randomUUID } from "node:crypto";
 import { TranscriptView } from "./transcript.js";
 import { BottomSlot } from "./bottom-slot.js";
 import { ModelPicker, type ProviderEntry } from "./model-picker.js";
@@ -20,6 +21,7 @@ import { BgTasks } from "./bg-tasks.js";
 import { handleCommand } from "./commands.js";
 import { Agent, AgentEvents } from "../agent.js";
 import type { ProcessManager } from "../process/manager.js";
+import type { SubagentManager } from "../subagent/manager.js";
 import { Session, stripInjected, type SessionData } from "../session.js";
 import type { ConfirmRequest, ConfirmResult } from "../tools/registry.js";
 import type { PermissionEngine } from "../permissions.js";
@@ -64,6 +66,7 @@ export class App {
     private checkpointer: FileCheckpointer,
     private undercover: UndercoverState,
     public pm: ProcessManager,
+    public subMgr: SubagentManager,
     public providers: ProviderEntry[] = [],
     private store: SessionStore | null = null,
     terminal: Terminal = new ProcessTerminal(),
@@ -118,6 +121,14 @@ export class App {
     return this.ask;
   }
 
+  /** Live progress line (e.g. subagent tool activity) as a dim nested notice. */
+  getMonitor() {
+    return (line: string) => {
+      this.view.addSpaced(notice(line));
+      this.tui.requestRender();
+    };
+  }
+
   // ---- input / commands ---------------------------------------------------
 
   private async submit(text: string) {
@@ -139,7 +150,9 @@ export class App {
     this.slot.editor.disableSubmit = true;
     this.status = "thinking…";
 
-    this.view.markTurnStart();
+    // One stable id ties this turn's UI blocks to its session checkpoint.
+    const turnId = randomUUID();
+    this.view.markTurnStart(turnId);
 
     // Any queued bg completions (notify or quiet) ride along as their own
     // context notes/blocks, separate from the user's message.
@@ -148,7 +161,7 @@ export class App {
     this.view.addSpaced(new UserMessage(trimmed));
 
     try {
-      await this.agent.run(trimmed, this.events(), notes);
+      await this.agent.run(trimmed, this.events(), notes, turnId);
     } catch (err: any) {
       this.view.setLoader(null);
       this.view.addBlock(
@@ -255,12 +268,15 @@ export class App {
     const selector = new RewindSelector(
       items,
       (i) => {
+        // Resolve the selected row to its stable turn id, then drive both the
+        // session and the view by that id — never by array position.
         const cp = this.session.checkpoints[i];
-        if (cp) this.checkpointer.restoreTo(cp.fileMark); // undo file edits from this turn on
-        const text = this.session.rewindTo(i);
-        const start = this.view.turnStartAt(i);
+        if (!cp) return;
+        this.checkpointer.restoreTo(cp.fileMark); // undo file edits from this turn on
+        const start = this.view.turnStartAt(cp.id);
         if (start !== undefined) this.view.removeFrom(start);
-        this.view.truncateTurns(i);
+        this.view.truncateTurns(cp.id);
+        const text = this.session.rewindTo(cp.id);
         this.slot.restore();
         // Restore the user's text WITHOUT the system-injected blocks (hook
         // context, bg updates) — those are re-added on the next submit; leaking
@@ -406,6 +422,7 @@ export class App {
     this.slot.editor.onSubmit = (text) => void this.submit(text);
     for (const h of loadHistory()) this.slot.editor.addToHistory(h); // oldest→newest
     this.pm.onBackgroundExit = (rec) => this.bgTasks.onExit(rec);
+    this.subMgr.onExit = (rec) => this.bgTasks.onSubagentExit(rec);
 
     if (this.session.messages.length > 0) this.view.renderHistory(this.session);
 

@@ -54,6 +54,16 @@ export class HookRunner {
     return (this.hooks[event]?.length ?? 0) > 0;
   }
 
+  /**
+   * Hooks a subagent should run: tool lifecycle only. The main-agent prompt/Stop
+   * events don't apply inside a subagent — its completion fires SubagentStop on
+   * the parent runner instead (mirrors Claude Code's Stop vs SubagentStop split).
+   */
+  forSubagent(): HookRunner {
+    const { PreToolUse, PostToolUse } = this.hooks;
+    return new HookRunner({ PreToolUse, PostToolUse });
+  }
+
   private matching(event: HookEvent, toolName?: string): HookDef[] {
     const defs = this.hooks[event] ?? [];
     if (toolName === undefined) return defs;

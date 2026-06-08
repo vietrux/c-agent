@@ -34,9 +34,11 @@ function compactJson(v: any): string {
 export class TranscriptView {
   readonly container = new Container();
 
-  // tracked message blocks + the block index where each user turn began
+  // tracked message blocks + the block index where each user turn began,
+  // tagged with the turn's stable checkpoint id so /rewind matches on identity
+  // (not array position) and can't desync from Session.checkpoints.
   private blocks: Component[] = [];
-  private turnStart: number[] = [];
+  private turns: { id: string; blockStart: number }[] = [];
 
   private loader: Loader | null = null;
   private liveAssistant: { md: Markdown; buf: string } | null = null;
@@ -100,24 +102,25 @@ export class TranscriptView {
 
   // ---- turn bookkeeping (for /rewind, /new) -------------------------------
 
-  /** Mark the current block position as the start of a new user turn. */
-  markTurnStart() {
-    this.turnStart.push(this.blocks.length);
+  /** Mark the current block position as the start of the turn `id`. */
+  markTurnStart(id: string) {
+    this.turns.push({ id, blockStart: this.blocks.length });
   }
 
-  /** Block index where turn `i` began, or undefined. */
-  turnStartAt(i: number): number | undefined {
-    return this.turnStart[i];
+  /** Block index where turn `id` began, or undefined. */
+  turnStartAt(id: string): number | undefined {
+    return this.turns.find((t) => t.id === id)?.blockStart;
   }
 
-  /** Drop turn markers from index `i` onward (rewind to turn `i`). */
-  truncateTurns(i: number) {
-    this.turnStart.length = i;
+  /** Drop turn `id` and every marker after it (rewind to that turn). */
+  truncateTurns(id: string) {
+    const i = this.turns.findIndex((t) => t.id === id);
+    if (i >= 0) this.turns.length = i;
   }
 
   /** Forget all turn markers (history collapsed/cleared/resumed). */
   resetTurns() {
-    this.turnStart.length = 0;
+    this.turns.length = 0;
   }
 
   /** Clear every block and turn marker. */
@@ -189,7 +192,7 @@ export class TranscriptView {
         this.setLoader(null);
         const arg =
           name === "bash" ? String(input.command ?? "") : compactJson(input);
-        const tb = new ToolBlock(name, arg.slice(0, 160));
+        const tb = new ToolBlock(name, arg); // full body — never truncate the call
         tb.setExpanded(this.toolsExpanded);
         this.toolBlocks.set(id, tb);
         this.addSpaced(tb);
@@ -212,8 +215,11 @@ export class TranscriptView {
         }
         this.addBlock(notice("⊘ interrupted"));
       },
-      compacted: (note) => {
-        this.resetTurns(); // history collapsed — reset rewind base
+      compacted: (note, collapsed) => {
+        // Only a full compaction collapses history + drops checkpoints; reset the
+        // turn markers to stay in sync. Micro-compaction leaves message/turn
+        // structure intact, so wiping markers here would desync /rewind.
+        if (collapsed) this.resetTurns();
         this.addSpaced(notice(`⊙ ${note}`));
       },
     };
@@ -229,7 +235,7 @@ export class TranscriptView {
       // A turn starts at its checkpoint msgIndex (the note, or the user message).
       const cp = session.checkpoints[turn];
       if (cp && cp.msgIndex === idx) {
-        this.turnStart[turn] = this.blocks.length;
+        this.turns.push({ id: cp.id, blockStart: this.blocks.length });
         turn++;
       }
       if (m.role === "note") {
@@ -243,7 +249,7 @@ export class TranscriptView {
             tc.name === "bash"
               ? String(tc.input?.command ?? "")
               : compactJson(tc.input);
-          const tb = new ToolBlock(tc.name, arg.slice(0, 160));
+          const tb = new ToolBlock(tc.name, arg); // full body — never truncate the call
           tb.setExpanded(this.toolsExpanded);
           this.addSpaced(tb);
           idToBlock.set(tc.id, tb);

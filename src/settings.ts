@@ -28,7 +28,13 @@ export interface HookDef {
   command: string;
 }
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop" | "SessionStart";
+export type HookEvent =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "UserPromptSubmit"
+  | "Stop"
+  | "SubagentStop"
+  | "SessionStart";
 export type HookConfig = Partial<Record<HookEvent, HookDef[]>>;
 
 export interface ProviderConfig {

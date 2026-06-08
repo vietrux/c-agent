@@ -13,7 +13,7 @@ export interface AgentEvents {
   toolEnd(id: string, result: string, isError: boolean): void;
   status(text: string | null): void;
   interrupted(): void;
-  compacted?(note: string): void;
+  compacted?(note: string, collapsed: boolean): void;
 }
 
 const BASE_SYSTEM =
@@ -207,6 +207,7 @@ export class Agent {
     userText: string,
     ev: AgentEvents,
     notes: string[] = [],
+    turnId?: string,
   ): Promise<void> {
     let text = userText;
     const hooks = this.toolCtx.hooks;
@@ -215,7 +216,7 @@ export class Agent {
       if (r.context)
         text += `\n\n<hook-context>\n${r.context}\n</hook-context>`;
     }
-    this.session.pushUser(text, this.toolCtx.checkpointer?.mark ?? 0, notes);
+    this.session.pushUser(text, this.toolCtx.checkpointer?.mark ?? 0, notes, turnId);
     await this.loop(ev);
     if (hooks?.has("Stop"))
       await hooks.run("Stop", { messages: this.session.messages.length });
@@ -305,6 +306,7 @@ export class Agent {
     this.lastSentMsgCount = 0;
     ev.compacted?.(
       `compacted ${older.length} messages → summary (${KEEP_TURNS} turns kept)`,
+      true, // history collapsed + checkpoints dropped — turn markers invalid
     );
     return true;
   }
@@ -357,6 +359,7 @@ export class Agent {
         if (freed > 0)
           ev.compacted?.(
             `micro-compacted: cleared ~${freed} tokens of old tool output`,
+            false, // tool results blanked in place — message/turn structure intact
           );
         if (this.contextTokens() > CONTEXT_TOKENS * COMPACT_RATIO) {
           await this.compact(ev, signal);

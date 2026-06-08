@@ -14,6 +14,7 @@ export function stripInjected(text: string): string {
 }
 
 export interface Checkpoint {
+  id: string; // stable turn identity — rewind/UI match on this, not array position
   label: string; // preview of the user message
   msgIndex: number; // index into messages BEFORE this user turn was pushed
   fileMark: number; // file-snapshot count at the start of this turn (for rewind)
@@ -57,7 +58,8 @@ export class Session {
     s.title = d.title;
     s.updatedAt = d.updatedAt;
     s.messages = d.messages;
-    s.checkpoints = d.checkpoints;
+    // Backfill ids for checkpoints persisted before turns were id-tagged.
+    s.checkpoints = d.checkpoints.map((c) => (c.id ? c : { ...c, id: randomUUID() }));
     return s;
   }
 
@@ -83,10 +85,11 @@ export class Session {
    * their own messages first; the checkpoint points at the start of the turn so
    * a rewind drops the notes too.
    */
-  pushUser(text: string, fileMark = 0, notes: string[] = []) {
+  pushUser(text: string, fileMark = 0, notes: string[] = [], id: string = randomUUID()): string {
     const display = stripInjected(text).replace(/\s+/g, " ");
     if (!this.title) this.title = display.slice(0, 80);
     this.checkpoints.push({
+      id,
       label: display.slice(0, 60),
       msgIndex: this.messages.length, // start of turn (before any notes)
       fileMark,
@@ -94,6 +97,7 @@ export class Session {
     for (const n of notes) this.messages.push({ role: "note", content: n });
     this.messages.push({ role: "user", content: text });
     this.touched();
+    return id;
   }
 
   push(msg: NeutralMessage) {
@@ -101,10 +105,15 @@ export class Session {
     this.touched();
   }
 
-  /** Drop everything from checkpoint i onward. Returns the user text rewound to. */
-  rewindTo(i: number): string | null {
+  /**
+   * Drop the turn with `id` and everything after it. Matches on the stable
+   * checkpoint id (not array position) so a desynced UI can't rewind the wrong
+   * turn. Returns the user text rewound to, or null if the id is unknown.
+   */
+  rewindTo(id: string): string | null {
+    const i = this.checkpoints.findIndex((c) => c.id === id);
+    if (i < 0) return null;
     const cp = this.checkpoints[i];
-    if (!cp) return null;
     // The user message sits at/after msgIndex (notes may precede it in the turn).
     let userText = "";
     for (let j = cp.msgIndex; j < this.messages.length; j++) {

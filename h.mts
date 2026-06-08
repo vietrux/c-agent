@@ -4,6 +4,7 @@ import { Agent } from "./src/agent.js";
 import { Session } from "./src/session.js";
 import { buildRegistry } from "./src/tools/index.js";
 import { ProcessManager } from "./src/process/manager.js";
+import { SubagentManager } from "./src/subagent/manager.js";
 import { PermissionEngine } from "./src/permissions.js";
 import { FileCheckpointer } from "./src/checkpoint.js";
 import { Vault } from "./src/utils/redact.js";
@@ -14,7 +15,7 @@ const pm=new ProcessManager(),session=new Session(process.cwd()),registry=buildR
 const engine=new PermissionEngine({},"bypass"); const cp=new FileCheckpointer();
 const agent=new Agent(session,registry,{pm,cwd:process.cwd(),todos:[],engine,checkpointer:cp},new SP());
 const uc={enabled:false,vault:new Vault(session.id)};
-const term=new FT(); const app:any=new App(agent,session,engine,cp,uc,pm,[],null,term);
+const term=new FT(); const app:any=new App(agent,session,engine,cp,uc,pm,new SubagentManager(),[],null,term);
 const tick=()=>new Promise(r=>setTimeout(r,30));
 try{
  app.start(); await tick();

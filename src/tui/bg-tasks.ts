@@ -6,6 +6,7 @@ import type { TranscriptView } from "./transcript.js";
 import type { BottomSlot } from "./bottom-slot.js";
 import type { Agent, AgentEvents } from "../agent.js";
 import type { ProcessManager, ProcRecord } from "../process/manager.js";
+import type { SubagentManager, SubRecord } from "../subagent/manager.js";
 
 /** The slice of App the background-task orchestrator drives. */
 export interface BgHost {
@@ -16,6 +17,7 @@ export interface BgHost {
   tui: TUI;
   agent: Agent;
   pm: ProcessManager;
+  subMgr: SubagentManager;
   events(): AgentEvents;
 }
 
@@ -57,6 +59,24 @@ export class BgTasks {
       notify: rec.notify,
     });
     if (rec.notify) this.scheduleDrain();
+    this.host.tui.requestRender();
+  }
+
+  /** Fired by SubagentManager when a background subagent settles. Always wakes
+   * the agent (notify) so it can act on the subagent's result. */
+  onSubagentExit(rec: SubRecord): void {
+    const status = rec.status === "done" ? "ok" : rec.status;
+    this.host.view.addSpaced(
+      notice(`✓ subagent [${rec.id}] ${rec.label} finished (${status})`),
+    );
+    this.queue.push({
+      content:
+        `Background subagent [${rec.id}] (${rec.label}) finished (${status}).` +
+        (rec.result ? `\nResult:\n${rec.result}` : "") +
+        (rec.error ? `\nError: ${rec.error}` : ""),
+      notify: true,
+    });
+    this.scheduleDrain();
     this.host.tui.requestRender();
   }
 
@@ -111,29 +131,51 @@ export class BgTasks {
     }
   }
 
-  /** /bg: list background tasks; Enter cancels a running one. */
+  /** /bg: list background shells + subagents; Enter cancels a running one. */
   openPanel(): void {
     const host = this.host;
-    const tasks = host.pm.listBackground();
-    if (tasks.length === 0) {
+    // Unified row: a bg shell or a bg subagent, each cancellable by kind.
+    type Row = { kind: "proc" | "sub"; id: string; running: boolean; cancel: () => boolean };
+    const rows: { item: RewindItem; row: Row }[] = [];
+
+    host.pm.listBackground().forEach((task) => {
+      rows.push({
+        item: {
+          index: rows.length,
+          label: task.command,
+          subtitle: task.running
+            ? `shell [${task.id}] running · Enter to cancel`
+            : `shell [${task.id}] exited(${task.exitCode ?? "?"})`,
+        },
+        row: { kind: "proc", id: task.id, running: task.running, cancel: () => host.pm.kill(task.id) },
+      });
+    });
+    host.subMgr.list().forEach((sub) => {
+      const running = sub.status === "running";
+      rows.push({
+        item: {
+          index: rows.length,
+          label: `${sub.label}: ${sub.prompt.replace(/\s+/g, " ").slice(0, 50)}`,
+          subtitle: running
+            ? `subagent [${sub.id}] running · Enter to cancel`
+            : `subagent [${sub.id}] ${sub.status}`,
+        },
+        row: { kind: "sub", id: sub.id, running, cancel: () => host.subMgr.kill(sub.id) },
+      });
+    });
+
+    if (rows.length === 0) {
       host.view.addBlock(notice("no background tasks"));
       return;
     }
-    const items: RewindItem[] = tasks.map((task, i) => ({
-      index: i,
-      label: task.command,
-      subtitle: task.running
-        ? `[${task.id}] running · Enter to cancel`
-        : `[${task.id}] exited(${task.exitCode ?? "?"})`,
-    }));
     const selector = new ListSelector(
       "Background tasks",
       "↑/↓ select · Enter cancel running · Esc close",
-      items,
+      rows.map((r) => r.item),
       (i) => {
-        const task = tasks[i];
-        if (task.running && host.pm.kill(task.id)) {
-          host.view.addBlock(notice(`✗ cancelled [${task.id}]`));
+        const { row } = rows[i];
+        if (row.running && row.cancel()) {
+          host.view.addBlock(notice(`✗ cancelled ${row.kind} [${row.id}]`));
         }
         host.slot.restore();
       },

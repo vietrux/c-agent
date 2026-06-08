@@ -16,6 +16,7 @@ import { connectMcpServers } from "./mcp/index.js";
 import { loadPrefs } from "./prefs.js";
 import { loadSkills } from "./skills.js";
 import { loadAgentDefs } from "./subagents.js";
+import { SubagentManager } from "./subagent/manager.js";
 import { HookRunner } from "./hooks.js";
 import { RedactingProvider } from "./provider/redacting.js";
 import { Vault, type UndercoverState } from "./utils/redact.js";
@@ -166,18 +167,62 @@ async function main() {
     hooks,
   };
 
-  // Subagent spawner: fresh session + agent, optional role from an agent def.
-  toolCtx.spawn = async (prompt: string, agentType?: string): Promise<string> => {
+  // Build a subagent: fresh session + agent, optional role from an agent def.
+  // Returns the agent (so a background run can abort it) and a `run` that drives
+  // it to completion, fires SubagentStop, and yields the final summary text.
+  const subMgr = new SubagentManager();
+  const buildSubagent = (prompt: string, agentType?: string) => {
     const def = agentType ? agentDefs.get(agentType) : undefined;
     const subRegistry = def?.tools ? registry.subset(def.tools) : registry;
     const subSession = new Session(cwd);
-    const subCtx: ToolContext = { ...toolCtx, spawn: undefined }; // no nested spawning
+    const label = agentType || "general-purpose";
+    const subCtx: ToolContext = {
+      ...toolCtx,
+      spawn: undefined, // no nested spawning
+      spawnBackground: undefined,
+      hooks: toolCtx.hooks?.forSubagent(), // tool hooks only; SubagentStop fires below
+    };
+    // Live monitoring: surface the subagent's tool activity in the parent TUI
+    // (the parent only sees the final summary otherwise).
+    const mon = toolCtx.monitor;
+    const events: AgentEvents = mon
+      ? {
+          ...NOOP_EVENTS,
+          toolStart: (_id, name, input) => {
+            const arg = name === "bash" ? String(input?.command ?? "") : "";
+            const head = arg.split("\n")[0].slice(0, 80);
+            mon(`↳ ${label}: ${name}${head ? " " + head : ""}`);
+          },
+        }
+      : NOOP_EVENTS;
     const subAgent = new Agent(subSession, subRegistry, subCtx, provider, def?.systemPrompt);
-    await subAgent.run(prompt, NOOP_EVENTS);
-    const last = [...subSession.messages]
-      .reverse()
-      .find((m) => m.role === "assistant" && m.toolCalls.length === 0);
-    return last && last.role === "assistant" ? last.content : "";
+    const run = async (): Promise<string> => {
+      await subAgent.run(prompt, events);
+      const last = [...subSession.messages]
+        .reverse()
+        .find((m) => m.role === "assistant" && m.toolCalls.length === 0);
+      const text = last && last.role === "assistant" ? last.content : "";
+      // SubagentStop hook (CC parity): fires on the PARENT runner when the
+      // subagent finishes, carrying its type + final message.
+      if (toolCtx.hooks?.has("SubagentStop"))
+        await toolCtx.hooks.run("SubagentStop", { agent_type: label, last_message: text });
+      return text;
+    };
+    return { subAgent, label, run };
+  };
+
+  toolCtx.spawn = async (prompt: string, agentType?: string): Promise<string> => {
+    const { label, run } = buildSubagent(prompt, agentType);
+    toolCtx.monitor?.(`↳ spawned ${label} subagent`);
+    return run();
+  };
+
+  toolCtx.spawnBackground = (prompt: string, agentType?: string): string => {
+    const { subAgent, label, run } = buildSubagent(prompt, agentType);
+    return subMgr.start(label, prompt, () => ({
+      done: run(),
+      abort: () => subAgent.abort(),
+    }));
   };
 
   registry.register(taskTool);
@@ -196,11 +241,12 @@ async function main() {
     process.on("exit", shutdownMcp);
   }
 
-  const app = new App(agent, session, engine, checkpointer, undercover, pm, entries, store);
+  const app = new App(agent, session, engine, checkpointer, undercover, pm, subMgr, entries, store);
   app.mcpSummary = mcpSummary;
   app.activeProviderName = activeName;
   toolCtx.ask = app.getAsk();
   toolCtx.confirm = app.getConfirm();
+  toolCtx.monitor = app.getMonitor();
 
   const shutdown = () => pm.killAll();
   process.on("exit", shutdown);

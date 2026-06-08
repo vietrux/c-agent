@@ -44,8 +44,12 @@ export interface ToolContext {
   checkpointer?: FileCheckpointer;
   /** Discovered skills, looked up by the `skill` tool. */
   skills?: Skill[];
-  /** Spawn a subagent for a prompt and return its final text. */
+  /** Spawn a subagent for a prompt and return its final text (blocking). */
   spawn?: (prompt: string, agentType?: string) => Promise<string>;
+  /** Spawn a subagent in the background; returns its id, notifies on finish. */
+  spawnBackground?: (prompt: string, agentType?: string) => string;
+  /** Surface a live progress line (e.g. subagent tool activity) in the TUI. */
+  monitor?: (line: string) => void;
   /** Lifecycle shell hooks (PreToolUse / PostToolUse). */
   hooks?: HookRunner;
 }
