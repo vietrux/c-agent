@@ -124,6 +124,7 @@ export class OpenAIProvider implements Provider {
       name: c.name,
       input: safeParse(c.args),
     }));
+    for (const toolCall of toolCalls) handlers.onToolCallReady?.(toolCall);
     return { text, toolCalls, usage };
   }
 }

@@ -2,6 +2,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { Session } from "./session.js";
 import { ToolRegistry, ToolContext } from "./tools/registry.js";
+import { StreamingToolScheduler, type ToolEventInfo } from "./tools/scheduler.js";
+import { capToolResultsAggregate } from "./tools/result-cap.js";
 import { BASE_SYSTEM_A, BEHAVIOR_GUIDANCE_C } from "./.system_prompt.js";
 import type { Provider, Usage, NeutralMessage } from "./provider/types.js";
 
@@ -9,8 +11,9 @@ export interface AgentEvents {
   reasoningDelta(text: string): void;
   assistantDelta(text: string): void;
   assistantEnd(): void;
-  toolStart(id: string, name: string, input: any): void;
-  toolEnd(id: string, result: string, isError: boolean): void;
+  toolQueued?(id: string, name: string, input: any, info: ToolEventInfo): void;
+  toolStart(id: string, name: string, input: any, info?: ToolEventInfo): void;
+  toolEnd(id: string, result: string, isError: boolean, info?: ToolEventInfo): void;
   status(text: string | null): void;
   interrupted(): void;
   compacted?(note: string, collapsed: boolean): void;
@@ -53,6 +56,7 @@ const MAX_STEPS = 100;
 // Cap on how many concurrency-safe tool calls run at once, so a turn that emits
 // dozens of read/grep calls can't spawn an unbounded burst of work.
 const MAX_TOOL_CONCURRENCY = Number(process.env.C_AGENT_MAX_TOOL_CONCURRENCY) || 10;
+const TOOL_RESULT_BUDGET = Number(process.env.C_AGENT_TOOL_RESULT_BUDGET) || 120_000;
 
 // Context budget (in tokens, ~4 chars each). Compact when the transcript estimate
 // crosses COMPACT_RATIO of the budget, keeping the most recent turns verbatim.
@@ -131,19 +135,6 @@ Output ONLY the note, wrapped in <summary> tags, with these sections:
 8. Next Step — the single most likely next action, if any (omit if unclear).
 
 No preamble, no commentary outside the <summary> tags.`;
-
-/** Run thunks with a bounded number in flight at once, preserving no order. */
-async function runPool(tasks: (() => Promise<void>)[], limit: number): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    while (next < tasks.length) {
-      const i = next++;
-      await tasks[i]();
-    }
-  };
-  const n = Math.min(Math.max(1, limit), tasks.length);
-  await Promise.all(Array.from({ length: n }, worker));
-}
 
 export class Agent {
   private system: string;
@@ -371,6 +362,16 @@ export class Agent {
 
       // Message count at send time — the anchor for context accounting below.
       const sentMsgCount = this.session.messages.length;
+      const toolScheduler = new StreamingToolScheduler(
+        this.registry,
+        this.toolCtx,
+        ev,
+        signal,
+        {
+          maxConcurrency: MAX_TOOL_CONCURRENCY,
+          deferUnsafeUntilReleased: true,
+        },
+      );
 
       let result;
       try {
@@ -381,6 +382,9 @@ export class Agent {
           {
             onText: (d) => ev.assistantDelta(d),
             onReasoning: (d) => ev.reasoningDelta(d),
+            onToolCallReady: (tc) => {
+              toolScheduler.add(tc);
+            },
           },
           signal,
         );
@@ -437,7 +441,11 @@ export class Agent {
           ? `running ${toolCalls.length} tools…`
           : `tool: ${toolCalls[0].name}`,
       );
-      const results = await this.runTools(toolCalls, ev, signal);
+      toolScheduler.releaseUnsafe();
+      const results = capToolResultsAggregate(
+        await toolScheduler.waitFor(toolCalls),
+        TOOL_RESULT_BUDGET,
+      );
       this.session.push({ role: "tool", results }); // keep tool_use/tool_result paired
       if (signal.aborted) return ev.interrupted();
     }
@@ -445,70 +453,6 @@ export class Agent {
     ev.toolEnd("agent", `stopped after ${MAX_STEPS} steps`, true);
   }
 
-  /**
-   * Execute a turn's tool calls, preserving result order. Consecutive
-   * concurrency-safe (read-only) calls run in parallel; write/exec calls run
-   * serially so two parallel mutations can't corrupt shared state (e.g. two
-   * edits to the same file, or a read racing a write).
-   */
-  private async runTools(
-    toolCalls: { id: string; name: string; input: any }[],
-    ev: AgentEvents,
-    signal: AbortSignal,
-  ): Promise<{ id: string; content: string; isError: boolean }[]> {
-    const results = new Array<{
-      id: string;
-      content: string;
-      isError: boolean;
-    }>(toolCalls.length);
-
-    const runOne = async (
-      tc: { id: string; name: string; input: any },
-      i: number,
-    ) => {
-      ev.toolStart(tc.id, tc.name, tc.input);
-      if (signal.aborted) {
-        results[i] = { id: tc.id, content: "✗ interrupted", isError: true };
-        ev.toolEnd(tc.id, "✗ interrupted", true);
-        return;
-      }
-      const res = await this.registry.dispatch(
-        tc.name,
-        tc.input,
-        this.toolCtx,
-        signal,
-      );
-      ev.toolEnd(tc.id, res.text, res.isError ?? false);
-      results[i] = {
-        id: tc.id,
-        content: res.text, // already capped/spilled by the registry
-        isError: res.isError ?? false,
-      };
-    };
-
-    let i = 0;
-    while (i < toolCalls.length) {
-      if (this.registry.isConcurrencySafe(toolCalls[i].name, toolCalls[i].input)) {
-        // Batch consecutive read-only calls and run them with bounded concurrency.
-        const thunks: (() => Promise<void>)[] = [];
-        while (
-          i < toolCalls.length &&
-          this.registry.isConcurrencySafe(toolCalls[i].name, toolCalls[i].input)
-        ) {
-          const tc = toolCalls[i];
-          const idx = i;
-          thunks.push(() => runOne(tc, idx));
-          i++;
-        }
-        await runPool(thunks, MAX_TOOL_CONCURRENCY);
-      } else {
-        // A write/exec call runs alone, to completion, before the next call.
-        await runOne(toolCalls[i], i);
-        i++;
-      }
-    }
-    return results;
-  }
 }
 
 function buildSystem(

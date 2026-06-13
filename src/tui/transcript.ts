@@ -188,17 +188,35 @@ export class TranscriptView {
           this.liveReasoning = null;
         }
       },
-      toolStart: (id, name, input) => {
+      toolQueued: (id, name, input, info) => {
         this.setLoader(null);
         const arg =
           name === "bash" ? String(input.command ?? "") : compactJson(input);
-        const tb = new ToolBlock(name, arg); // full body — never truncate the call
+        const tb = new ToolBlock(name, arg);
         tb.setExpanded(this.toolsExpanded);
+        tb.setMeta(info);
         this.toolBlocks.set(id, tb);
         this.addSpaced(tb);
       },
-      toolEnd: (id, result, isError) => {
-        this.toolBlocks.get(id)?.setResult(result, isError);
+      toolStart: (id, name, input, info) => {
+        this.setLoader(null);
+        let tb = this.toolBlocks.get(id);
+        if (!tb) {
+          const arg =
+            name === "bash" ? String(input.command ?? "") : compactJson(input);
+          tb = new ToolBlock(name, arg); // full body — never truncate the call
+          tb.setExpanded(this.toolsExpanded);
+          this.toolBlocks.set(id, tb);
+          this.addSpaced(tb);
+        }
+        if (info) tb.setMeta(info);
+        tb.start();
+        this.tui.requestRender();
+      },
+      toolEnd: (id, result, isError, info) => {
+        const tb = this.toolBlocks.get(id);
+        if (info) tb?.setMeta(info);
+        tb?.setResult(result, isError);
         this.toolBlocks.delete(id);
         this.tui.requestRender();
       },

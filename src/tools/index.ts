@@ -2,9 +2,10 @@ import { ToolRegistry } from "./registry.js";
 import { bashTool, procListTool, procReadTool, procTailTool, procKillTool } from "./bash.js";
 import { readTool, writeTool, editTool, multiEditTool, globTool, grepTool } from "./files.js";
 import { todoTool, askTool } from "./meta.js";
-import { httpRequestTool } from "./http.js";
+import { webFetchTool } from "./web-fetch.js";
 import { codecTool } from "./codec.js";
 import { notesTool } from "./notes.js";
+import { createToolSearchTool } from "./tool-search.js";
 
 export function buildRegistry(): ToolRegistry {
   const r = new ToolRegistry();
@@ -22,12 +23,13 @@ export function buildRegistry(): ToolRegistry {
     grepTool,
     todoTool,
     askTool,
-    httpRequestTool,
+    webFetchTool,
     codecTool,
     notesTool,
   ]) {
     r.register(t);
   }
+  r.register(createToolSearchTool(r));
   return r;
 }
 

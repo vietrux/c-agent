@@ -22,6 +22,12 @@ export interface StreamHandlers {
   onText(delta: string): void;
   /** Reasoning/thinking tokens (NIM reasoning_content, etc). Optional. */
   onReasoning?(delta: string): void;
+  /**
+   * A complete tool call became available before the final response resolved.
+   * Providers that cannot safely detect this early may call it at the end or not
+   * at all; the agent deduplicates against the final tool call list.
+   */
+  onToolCallReady?(toolCall: ToolCall): void;
 }
 
 export interface Usage {

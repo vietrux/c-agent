@@ -69,3 +69,50 @@ export function capToolResult(text: string, max: number = DEFAULT_MAX_TOOL_RESUL
     return headTail(text, max);
   }
 }
+
+export interface ToolResultLike {
+  id: string;
+  content: string;
+  isError: boolean;
+}
+
+/**
+ * Cap the aggregate tool-result payload for a single assistant turn. This guards
+ * the next model request from death-by-many-results: each tool may be under its
+ * own cap, but twenty reads/greps can still overwhelm context and latency.
+ */
+export function capToolResultsAggregate<T extends ToolResultLike>(
+  results: T[],
+  budget: number,
+): T[] {
+  if (!Number.isFinite(budget) || budget <= 0) return results;
+  const total = results.reduce((sum, result) => sum + result.content.length, 0);
+  if (total <= budget) return results;
+
+  let used = 0;
+  return results.map((result, index) => {
+    const remainingResults = results.length - index;
+    const remainingBudget = budget - used;
+    const minPreview = Math.min(2_000, Math.max(200, Math.floor(budget * 0.05)));
+    const share = Math.max(
+      minPreview,
+      Math.floor(Math.max(0, remainingBudget) / remainingResults),
+    );
+
+    if (remainingBudget <= 0) {
+      const omitted =
+        `[tool output omitted due to aggregate result budget — ${result.content.length} chars. ` +
+        `Ask to rerun or narrow the query if this specific output is needed.]`;
+      return { ...result, content: omitted };
+    }
+
+    if (used + result.content.length <= budget) {
+      used += result.content.length;
+      return result;
+    }
+
+    const capped = capToolResult(result.content, Math.min(share, remainingBudget));
+    used += capped.length;
+    return { ...result, content: capped };
+  });
+}

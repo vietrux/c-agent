@@ -1,5 +1,5 @@
 import { ProcessManager } from "./src/process/manager.js";
-import { httpRequestTool } from "./src/tools/http.js";
+import { webFetchTool } from "./src/tools/web-fetch.js";
 import { codecTool } from "./src/tools/codec.js";
 import { notesTool } from "./src/tools/notes.js";
 import type { ToolContext } from "./src/tools/registry.js";
@@ -104,36 +104,23 @@ check("set no key → error", nnk.isError === true, nnk.text);
 // clean up KEY2 without confirm (ctx has no confirm fn)
 await notesTool.run({ action: "delete", key: KEY2 }, ctx);
 
-// ── http_request ──────────────────────────────────────────────────────────────
-console.log("\nhttp_request");
+// ── web_fetch ────────────────────────────────────────────────────────────────
+console.log("\nweb_fetch");
 
 // invalid URL must return error, never throw
-const hbad = await httpRequestTool.run({ url: "not-a-url" }, ctx);
+const hbad = await webFetchTool.run({ url: "not-a-url", prompt: "Summarize" }, ctx);
 check("invalid url → error", hbad.isError === true, hbad.text.slice(0, 80));
 
-// real network (may fail in sandboxed env — that's OK, just can't throw)
-const hget = await httpRequestTool.run({ url: "https://httpbin.org/get", timeout_ms: 8_000 }, ctx);
+// real network (may fail in restricted env — that's OK, just can't throw)
+const hget = await webFetchTool.run(
+  { url: "https://example.com", prompt: "Return the page title." },
+  ctx,
+);
 if (!hget.isError) {
-  check("GET httpbin/get → 200", hget.text.startsWith("HTTP 200"), hget.text.slice(0, 40));
-  check("GET response has headers", hget.text.includes("content-type:"), hget.text.slice(0, 120));
-  check("GET response has body", hget.text.includes("httpbin"), hget.text.slice(0, 200));
+  check("fetch example.com → 200", hget.text.startsWith("HTTP 200"), hget.text.slice(0, 40));
+  check("fetch response contains page content", hget.text.includes("Example Domain"), hget.text.slice(0, 200));
 } else {
-  console.log(`  ~ http network test skipped (${hget.text.slice(0, 60)})`);
-}
-
-// POST with body + headers
-const hpost = await httpRequestTool.run({
-  url: "https://httpbin.org/post",
-  method: "POST",
-  headers: { "Content-Type": "application/json", "X-Custom": "redteam" },
-  body: JSON.stringify({ test: true }),
-  timeout_ms: 8_000,
-}, ctx);
-if (!hpost.isError) {
-  check("POST 200", hpost.text.startsWith("HTTP 200"), hpost.text.slice(0, 40));
-  check("POST body echoed", hpost.text.includes('"test"'), hpost.text.slice(0, 300));
-} else {
-  console.log(`  ~ POST network test skipped (${hpost.text.slice(0, 60)})`);
+  console.log(`  ~ web network test skipped (${hget.text.slice(0, 60)})`);
 }
 
 // ── summary ───────────────────────────────────────────────────────────────────

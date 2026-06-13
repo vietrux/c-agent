@@ -1,6 +1,7 @@
-import { readFile, writeFile, mkdir, glob } from "node:fs/promises";
+import { readFile, writeFile, mkdir, glob, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, resolve, isAbsolute, basename } from "node:path";
-import type { Tool } from "./registry.js";
+import type { FileReadSnapshot, Tool, ToolContext } from "./registry.js";
 
 // Dirs that are never search targets and blow up a recursive walk. Pruned
 // during glob traversal (descent stops), so `glob` from a deep/home dir can't
@@ -31,6 +32,59 @@ function abs(cwd: string, p: string): string {
   return isAbsolute(p) ? p : resolve(cwd, p);
 }
 
+function sha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function reads(ctx: ToolContext): Map<string, FileReadSnapshot> {
+  if (!ctx.fileReads) ctx.fileReads = new Map();
+  return ctx.fileReads;
+}
+
+async function fileSnapshot(full: string, content?: string): Promise<FileReadSnapshot> {
+  const st = await stat(full);
+  const raw = content ?? (await readFile(full, "utf8"));
+  return {
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    sha256: sha256(raw),
+  };
+}
+
+async function exists(full: string): Promise<boolean> {
+  try {
+    await stat(full);
+    return true;
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+function sameSnapshot(a: FileReadSnapshot, b: FileReadSnapshot): boolean {
+  return a.mtimeMs === b.mtimeMs && a.size === b.size && a.sha256 === b.sha256;
+}
+
+async function requireFreshRead(
+  ctx: ToolContext,
+  full: string,
+  action: "editing" | "overwriting",
+): Promise<string | null> {
+  const seen = reads(ctx).get(full);
+  if (!seen) {
+    return `✗ must read ${full} before ${action} it. Call read first so the change is based on current content.`;
+  }
+  const current = await fileSnapshot(full);
+  if (!sameSnapshot(seen, current)) {
+    return `✗ ${full} changed since it was last read. Read it again before ${action} it.`;
+  }
+  return null;
+}
+
+async function markRead(ctx: ToolContext, full: string, content?: string) {
+  reads(ctx).set(full, await fileSnapshot(full, content));
+}
+
 export const readTool: Tool = {
   concurrencySafe: true,
   // Never spill read output to disk — it already self-bounds by line count, and
@@ -57,6 +111,7 @@ export const readTool: Tool = {
   async run(input, ctx) {
     const full = abs(ctx.cwd, input.path);
     const raw = await readFile(full, "utf8");
+    await markRead(ctx, full, raw);
     const lines = raw.split("\n");
     const start = Math.max(0, (input.offset ?? 1) - 1);
     const limit = input.limit ?? 2000;
@@ -87,9 +142,14 @@ export const writeTool: Tool = {
   },
   async run(input, ctx) {
     const full = abs(ctx.cwd, input.path);
+    if (await exists(full)) {
+      const stale = await requireFreshRead(ctx, full, "overwriting");
+      if (stale) return { text: stale, isError: true };
+    }
     ctx.checkpointer?.snapshot(full);
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, input.content, "utf8");
+    await markRead(ctx, full, input.content);
     const bytes = Buffer.byteLength(input.content, "utf8");
     return { text: `wrote ${bytes} bytes to ${full}` };
   },
@@ -123,6 +183,8 @@ export const editTool: Tool = {
     if (old_string === new_string) {
       return { text: "old_string and new_string are identical", isError: true };
     }
+    const stale = await requireFreshRead(ctx, full, "editing");
+    if (stale) return { text: stale, isError: true };
     const raw = await readFile(full, "utf8");
     const count = raw.split(old_string).length - 1;
     if (count === 0) return { text: `old_string not found in ${full}`, isError: true };
@@ -137,6 +199,7 @@ export const editTool: Tool = {
       : raw.replace(old_string, new_string);
     ctx.checkpointer?.snapshot(full);
     await writeFile(full, updated, "utf8");
+    await markRead(ctx, full, updated);
     return { text: `edited ${full} (${replace_all ? count : 1} replacement${count > 1 && replace_all ? "s" : ""})` };
   },
 };
@@ -178,6 +241,8 @@ export const multiEditTool: Tool = {
     if (!Array.isArray(edits) || edits.length === 0) {
       return { text: "edits must be a non-empty array", isError: true };
     }
+    const stale = await requireFreshRead(ctx, full, "editing");
+    if (stale) return { text: stale, isError: true };
     let content = await readFile(full, "utf8");
     for (let i = 0; i < edits.length; i++) {
       const { old_string, new_string, replace_all } = edits[i];
@@ -195,6 +260,7 @@ export const multiEditTool: Tool = {
     }
     ctx.checkpointer?.snapshot(full);
     await writeFile(full, content, "utf8");
+    await markRead(ctx, full, content);
     return { text: `applied ${edits.length} edits to ${full}` };
   },
 };
@@ -292,6 +358,13 @@ export const grepTool: Tool = {
         ignore_case: { type: "boolean" },
         context: { type: "number", description: "lines of context around each match" },
         max_count: { type: "number", description: "cap total matching lines (default 200)" },
+        output_mode: {
+          type: "string",
+          description: "content (default), files_with_matches, or count",
+        },
+        head_limit: { type: "number", description: "max result rows after offset" },
+        offset: { type: "number", description: "zero-based result row offset" },
+        type: { type: "string", description: "rg file type, e.g. ts, js, py (rg only)" },
       },
       required: ["pattern"],
     },
@@ -299,18 +372,31 @@ export const grepTool: Tool = {
   async run(input, ctx) {
     const target = input.path ? abs(ctx.cwd, input.path) : ctx.cwd;
     const ctxLines = Number.isFinite(input.context) ? Math.max(0, Math.floor(input.context)) : 0;
-    const cap = Number.isFinite(input.max_count) ? Math.max(1, Math.floor(input.max_count)) : 200;
+    const outputMode = ["content", "files_with_matches", "count"].includes(input.output_mode)
+      ? input.output_mode
+      : "content";
+    const cap = Number.isFinite(input.head_limit)
+      ? Math.max(1, Math.floor(input.head_limit))
+      : Number.isFinite(input.max_count)
+        ? Math.max(1, Math.floor(input.max_count))
+        : 200;
+    const offset = Number.isFinite(input.offset) ? Math.max(0, Math.floor(input.offset)) : 0;
 
     let cmd: string;
     if (await hasRg(ctx)) {
       const parts = ["rg", "--line-number", "--no-heading", "--color=never"];
+      if (outputMode === "files_with_matches") parts.push("--files-with-matches");
+      if (outputMode === "count") parts.push("--count");
       if (input.ignore_case) parts.push("--ignore-case");
       if (input.glob) parts.push("-g", q(input.glob));
+      if (input.type) parts.push("--type", q(input.type));
       if (ctxLines) parts.push("-C", String(ctxLines));
       parts.push("--", q(input.pattern), q(target));
       cmd = parts.join(" ");
     } else {
       const parts = ["grep", "-rnI", "--color=never"];
+      if (outputMode === "files_with_matches") parts.push("-l");
+      if (outputMode === "count") parts.push("-c");
       if (input.ignore_case) parts.push("-i");
       if (input.glob) parts.push(`--include=${q(input.glob)}`);
       if (ctxLines) parts.push("-C", String(ctxLines));
@@ -321,8 +407,15 @@ export const grepTool: Tool = {
     const r = await ctx.pm.run({ command: cmd, cwd: ctx.cwd, timeoutMs: 30_000 });
     const lines = r.output.split("\n").filter((l) => l.length > 0);
     if (lines.length === 0) return { text: "no matches" };
-    const shown = lines.slice(0, cap);
+    const shown = lines.slice(offset, offset + cap);
     const body = shown.join("\n");
-    return { text: lines.length > cap ? body + `\n… (${lines.length - cap} more, raise max_count)` : body };
+    const skipped = offset > 0 ? `${offset} skipped, ` : "";
+    const remaining = Math.max(0, lines.length - offset - shown.length);
+    return {
+      text:
+        remaining > 0
+          ? body + `\n… (${skipped}${remaining} more, raise head_limit or offset)`
+          : body,
+    };
   },
 };

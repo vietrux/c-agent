@@ -1,5 +1,5 @@
 import { ProcessManager } from "../process/manager.js";
-import type { ToolSpec } from "../provider/types.js";
+import type { Provider, ToolSpec } from "../provider/types.js";
 import type { PermissionEngine, RuleSuggestion } from "../permissions.js";
 import type { FileCheckpointer } from "../checkpoint.js";
 import type { Skill } from "../skills.js";
@@ -10,6 +10,12 @@ import { audit } from "../utils/audit.js";
 export interface TodoItem {
   text: string;
   status: "pending" | "in_progress" | "done";
+}
+
+export interface FileReadSnapshot {
+  mtimeMs: number;
+  size: number;
+  sha256: string;
 }
 
 export type Decision = "allow" | "always" | "deny";
@@ -40,6 +46,8 @@ export interface ToolContext {
   confirm?: (req: ConfirmRequest) => Promise<ConfirmResult>;
   /** Permission rules + mode. Absent = legacy confirm-only behavior. */
   engine?: PermissionEngine;
+  /** Latest known read snapshot per absolute file path, used for stale-write protection. */
+  fileReads?: Map<string, FileReadSnapshot>;
   /** Snapshots file state before mutations so rewind can restore it. */
   checkpointer?: FileCheckpointer;
   /** Discovered skills, looked up by the `skill` tool. */
@@ -52,6 +60,8 @@ export interface ToolContext {
   monitor?: (line: string) => void;
   /** Lifecycle shell hooks (PreToolUse / PostToolUse). */
   hooks?: HookRunner;
+  /** Active model backend — used by web_fetch to summarize fetched content. */
+  provider?: Provider;
 }
 
 export interface ToolResult {
@@ -83,6 +93,14 @@ export interface Tool {
    * Infinity for tools whose output must never be persisted (e.g. read).
    */
   maxResultChars?: number;
+  /**
+   * Hide this tool from the default schema set until `tool_search` activates it.
+   * Use for specialty tools to reduce prompt/tool-schema load without removing
+   * discoverability.
+   */
+  defer?: boolean;
+  /** Extra searchable text for deferred-tool discovery. */
+  searchHint?: string;
   /** `signal` aborts on Esc/interrupt — long in-process tools (glob) honor it. */
   run(input: any, ctx: ToolContext, signal?: AbortSignal): Promise<ToolResult>;
 }
@@ -176,6 +194,7 @@ function deniedText(feedback?: string): string {
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
   private allowed = new Set<string>(); // tools the user chose "always" for this session
+  private activeDeferred = new Set<string>();
 
   register(t: Tool) {
     this.tools.set(t.spec.name, t);
@@ -185,13 +204,59 @@ export class ToolRegistry {
   subset(names: string[]): ToolRegistry {
     const r = new ToolRegistry();
     const want = new Set(names);
-    for (const t of this.tools.values())
-      if (want.has(t.spec.name)) r.register(t);
+    for (const t of this.tools.values()) {
+      if (!want.has(t.spec.name)) continue;
+      r.register(t);
+      if (this.activeDeferred.has(t.spec.name)) r.activate(t.spec.name);
+    }
     return r;
   }
 
   specs(): ToolSpec[] {
-    return [...this.tools.values()].map((t) => t.spec);
+    return [...this.tools.values()]
+      .filter((t) => !t.defer || this.activeDeferred.has(t.spec.name))
+      .map((t) => t.spec);
+  }
+
+  activate(name: string): boolean {
+    const t = this.tools.get(name);
+    if (!t) return false;
+    if (t.defer) this.activeDeferred.add(name);
+    return true;
+  }
+
+  isActive(name: string): boolean {
+    const t = this.tools.get(name);
+    return !!t && (!t.defer || this.activeDeferred.has(name));
+  }
+
+  deferredTools(): Tool[] {
+    return [...this.tools.values()].filter((t) => t.defer);
+  }
+
+  searchDeferred(query: string, limit = 8): Tool[] {
+    const q = query.trim().toLowerCase();
+    const terms = q.split(/\s+/).filter(Boolean);
+    const scored = this.deferredTools().map((tool) => {
+      const haystack = [
+        tool.spec.name,
+        tool.spec.description,
+        tool.searchHint ?? "",
+      ].join("\n").toLowerCase();
+      let score = this.activeDeferred.has(tool.spec.name) ? 1 : 0;
+      if (!q) score += 1;
+      if (haystack.includes(q)) score += 8;
+      for (const term of terms) {
+        if (tool.spec.name.toLowerCase().includes(term)) score += 5;
+        if (haystack.includes(term)) score += 2;
+      }
+      return { tool, score };
+    });
+    return scored
+      .filter((s) => s.score > 0)
+      .sort((a, b) => b.score - a.score || a.tool.spec.name.localeCompare(b.tool.spec.name))
+      .slice(0, limit)
+      .map((s) => s.tool);
   }
 
   /**

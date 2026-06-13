@@ -52,6 +52,7 @@ export class App {
   status = "ready";
   busy = false;
   private ctrlCAt = 0; // timestamp of last Ctrl+C — double-press within window exits
+  private queuedSubmissions: string[] = [];
 
   /** Set by index.ts after connecting MCP servers, shown by /mcp. */
   mcpSummary = "no MCP servers configured";
@@ -131,17 +132,26 @@ export class App {
 
   // ---- input / commands ---------------------------------------------------
 
-  private async submit(text: string) {
+  private async submit(text: string, fromQueue = false) {
     const trimmed = text.trim();
     if (!trimmed) return;
     // Record every submission for bash-style up/down recall (incl. slash cmds).
-    this.slot.editor.addToHistory(trimmed);
-    pushHistory(trimmed);
+    if (!fromQueue) {
+      this.slot.editor.addToHistory(trimmed);
+      pushHistory(trimmed);
+    }
     if (trimmed.startsWith("/")) {
       handleCommand(this, trimmed);
       return;
     }
-    if (this.busy) return;
+    if (this.busy) {
+      this.queuedSubmissions.push(trimmed);
+      this.view.addSpaced(
+        notice(`queued message (${this.queuedSubmissions.length} waiting)`),
+      );
+      this.tui.requestRender();
+      return;
+    }
     if (!this.agent.model) {
       this.view.addBlock(notice("pick a model first — use /model"));
       return;
@@ -172,8 +182,20 @@ export class App {
       this.status = "ready";
       this.slot.editor.disableSubmit = false;
       this.tui.requestRender();
-      // notify tasks that finished during this turn → run now.
-      if (this.bgTasks.shouldDrainAfterTurn()) void this.bgTasks.drainNotify();
+      const next = this.queuedSubmissions.shift();
+      if (next) {
+        this.view.addSpaced(
+          notice(
+            this.queuedSubmissions.length > 0
+              ? `running queued message (${this.queuedSubmissions.length} still waiting)`
+              : "running queued message",
+          ),
+        );
+        queueMicrotask(() => void this.submit(next, true));
+      } else if (this.bgTasks.shouldDrainAfterTurn()) {
+        // notify tasks that finished during this turn → run now.
+        void this.bgTasks.drainNotify();
+      }
     }
   }
 

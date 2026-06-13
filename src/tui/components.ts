@@ -8,6 +8,7 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 import { t, markdownTheme } from "./themes.js";
+import type { ToolEventInfo } from "../tools/scheduler.js";
 
 /** Full-width horizontal rule that adapts to viewport width. */
 export class DynamicBorder implements Component {
@@ -69,16 +70,17 @@ export class ReasoningBlock implements Component {
   }
 }
 
-export type ToolState = "pending" | "success" | "error";
+export type ToolState = "queued" | "running" | "success" | "error";
 
 /** Tool execution block: state-colored background box, title line + output. */
 export class ToolBlock extends Container {
   private box: Box;
   private titleText: Text;
   private outputText: Text;
-  private state: ToolState = "pending";
+  private state: ToolState = "queued";
   private output = "";
   private expanded = false;
+  private meta: ToolEventInfo | null = null;
 
   constructor(
     private name: string,
@@ -94,21 +96,43 @@ export class ToolBlock extends Container {
   }
 
   private bgFor(): (s: string) => string {
-    return this.state === "pending"
-      ? t.toolPendingBg
-      : this.state === "error"
+    return this.state === "error"
         ? t.toolErrorBg
-        : t.toolSuccessBg;
+        : this.state === "success"
+          ? t.toolSuccessBg
+          : t.toolPendingBg;
   }
 
   private icon(): string {
-    return this.state === "pending" ? "▷" : this.state === "error" ? "✗" : "✓";
+    return this.state === "queued"
+      ? "□"
+      : this.state === "running"
+        ? "▷"
+        : this.state === "error"
+          ? "✗"
+          : "✓";
+  }
+
+  private label(): string {
+    if (!this.meta) return "";
+    const pos = `${this.meta.index + 1}/${this.meta.total}`;
+    const mode = this.meta.concurrencySafe ? "parallel" : "serial";
+    const wait =
+      this.meta.queueMs !== undefined && this.meta.queueMs > 20
+        ? ` wait ${formatMs(this.meta.queueMs)}`
+        : "";
+    const took =
+      this.meta.durationMs !== undefined
+        ? ` took ${formatMs(this.meta.durationMs)}`
+        : "";
+    return `  ${pos} ${mode}${wait}${took}`;
   }
 
   private refresh() {
     this.box.setBgFn(this.bgFor());
     const title =
       t.toolTitle(t.bold(`${this.icon()} ${this.name}`)) +
+      t.dim(this.label()) +
       (this.argPreview ? t.toolOutput(`  ${this.argPreview}`) : "");
     this.titleText.setText(title);
 
@@ -132,11 +156,26 @@ export class ToolBlock extends Container {
     this.refresh();
   }
 
+  setMeta(info: ToolEventInfo) {
+    this.meta = info;
+    this.refresh();
+  }
+
+  start() {
+    this.state = "running";
+    this.refresh();
+  }
+
   setResult(output: string, isError: boolean) {
     this.output = output;
     this.state = isError ? "error" : "success";
     this.refresh();
   }
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
 }
 
 /** Plain dim status line used for system notices. */

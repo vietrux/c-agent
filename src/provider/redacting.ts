@@ -71,6 +71,13 @@ export class RedactingProvider implements Provider {
             if (out) handlers.onReasoning!(out);
           }
         : undefined,
+      onToolCallReady: handlers.onToolCallReady
+        ? (tc) =>
+            handlers.onToolCallReady!({
+              ...tc,
+              input: deepRestore(tc.input, vault),
+            })
+        : undefined,
     };
 
     const res = await this.inner.stream(sys, redacted, tools, wrapped, signal);

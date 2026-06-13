@@ -1,5 +1,6 @@
-import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync, chmodSync, renameSync, rmSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
 
 // All c-agent state may hold transcripts, notes, credentials, or PII. On a
 // shared/multi-user host (gov deployments) these must not be world-readable, so
@@ -27,5 +28,33 @@ export function writeSecureFile(path: string, data: string): void {
     chmodSync(path, FILE_MODE); // enforce on overwrite of a pre-existing looser file
   } catch {
     /* best effort */
+  }
+}
+
+/** Atomic secure write: write temp in the same dir, chmod, then rename over target. */
+export function writeSecureFileAtomic(path: string, data: string): void {
+  const dir = dirname(path);
+  ensureSecureDir(dir);
+  const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmp, data, { mode: FILE_MODE });
+    try {
+      chmodSync(tmp, FILE_MODE);
+    } catch {
+      /* best effort */
+    }
+    renameSync(tmp, path);
+    try {
+      chmodSync(path, FILE_MODE);
+    } catch {
+      /* best effort */
+    }
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* best effort */
+    }
+    throw err;
   }
 }

@@ -15,25 +15,16 @@
  *     side effect. Catastrophic.
  *
  * So the bias is hard toward `false`: we only return `true` for a command we can
- * prove is read-only by literal inspection. ANY shell construct that could
- * chain, redirect, substitute, background, or group commands voids the
- * classification, and the command must consist solely of an allowlisted,
- * non-program-spawning base command (or a git read-only subcommand). User `deny`
- * permission rules are still enforced regardless of this result.
- *
- * We do NOT parse quotes. A metacharacter inside quotes (e.g. `grep ">" f`) is
- * treated the same as an unquoted one → not read-only → prompt. Safe over clever.
+ * prove is read-only by literal inspection. Shell constructs that could chain,
+ * redirect, substitute, background, or group commands void classification, and
+ * the command must consist solely of an allowlisted, non-program-spawning base
+ * command (or a git read-only subcommand). User `deny` permission rules are
+ * still enforced regardless of this result.
  */
 
-// Any of these characters can introduce a second command, a redirect, a
-// substitution, a subshell, brace expansion, or backgrounding. Presence of even
-// one (quoted or not) voids read-only classification.
-//   ; | &   → chaining / backgrounding / pipelines
-//   < >     → redirects (and <( ) process substitution, << heredocs)
-//   ( ) ` $ are handled below; ( ) also via this set
-//   { }     → brace expansion
-//   \n      → multiple lines
-const SHELL_METACHARS = /[\n;|&<>`(){}]/;
+// Unquoted characters that can introduce a second command, redirect,
+// substitution, subshell, brace expansion, or backgrounding.
+const SHELL_METACHARS = new Set(["\n", ";", "|", "&", "<", ">", "(", ")", "{", "}"]);
 
 // Commands that read/inspect only and never spawn another program. Anything that
 // can execute a sub-program (env, xargs, sudo, timeout, nohup, watch, ssh, find
@@ -63,6 +54,76 @@ const FIND_WRITE_FLAGS = new Set([
   "-fprint", "-fprintf", "-fprint0", "-fls",
 ]);
 
+function tokenizeSingleCommand(command: string): string[] | null {
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (const ch of command) {
+    if (escaped) {
+      token += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else token += ch;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+      } else if (ch === "$" || ch === "`") {
+        return null;
+      } else {
+        token += ch;
+      }
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === "$" || ch === "`" || SHELL_METACHARS.has(ch)) return null;
+
+    if (/\s/.test(ch)) {
+      if (token) {
+        tokens.push(token);
+        token = "";
+      }
+      continue;
+    }
+    token += ch;
+  }
+
+  if (escaped || quote) return null;
+  if (token) tokens.push(token);
+  return tokens;
+}
+
+function readOnlyGitSubcommand(tokens: string[]): boolean {
+  if (tokens.some((t) => t === "--git-dir" || t.startsWith("--git-dir="))) return false;
+  if (tokens.some((t) => t === "--work-tree" || t.startsWith("--work-tree="))) return false;
+
+  let i = 1;
+  while (tokens[i] === "-C") {
+    if (!tokens[i + 1]) return false;
+    i += 2;
+  }
+  const sub = tokens[i];
+  return !!sub && GIT_READ_ONLY_SUBCMDS.has(sub);
+}
+
 /**
  * True only if `command` is provably a single read-only shell command.
  * Conservative by design — see the security model at the top of this file.
@@ -71,29 +132,24 @@ export function isReadOnlyBashCommand(command: string): boolean {
   const cmd = command.trim();
   if (!cmd) return false;
 
-  // 1. Reject any construct that could chain / redirect / substitute / group.
-  if (SHELL_METACHARS.test(cmd)) return false;
-  if (cmd.includes("$(")) return false; // command substitution (also caught by `(`, belt-and-braces)
+  const tokens = tokenizeSingleCommand(cmd);
+  if (!tokens || tokens.length === 0) return false;
 
-  const tokens = cmd.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return false;
-
-  // 2. Reject env-assignment prefixes (`FOO=bar somecmd` runs somecmd).
+  // 1. Reject env-assignment prefixes (`FOO=bar somecmd` runs somecmd).
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!)) return false;
 
-  // 3. Strip any leading path; classify on the bare program name.
+  // 2. Strip any leading path; classify on the bare program name.
   const base = tokens[0]!.split("/").pop() ?? tokens[0]!;
 
-  // 4. git: only an explicit read-only subcommand qualifies.
+  // 3. git: only an explicit read-only subcommand qualifies.
   if (base === "git") {
-    const sub = tokens[1];
-    return !!sub && GIT_READ_ONLY_SUBCMDS.has(sub);
+    return readOnlyGitSubcommand(tokens);
   }
 
-  // 5. Must be an allowlisted read-only command.
+  // 4. Must be an allowlisted read-only command.
   if (!SIMPLE_READ_ONLY.has(base)) return false;
 
-  // 6. Per-command flag guards for the few allowlisted commands that CAN write.
+  // 5. Per-command flag guards for the few allowlisted commands that CAN write.
   if (base === "find" && tokens.some((t) => FIND_WRITE_FLAGS.has(t))) return false;
   if (base === "sort" && tokens.some((t) => t === "-o" || t.startsWith("--output"))) return false;
 

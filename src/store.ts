@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdirSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { Session, type SessionData } from "./session.js";
-import { ensureSecureDir, writeSecureFile } from "./utils/secure-fs.js";
+import { ensureSecureDir, writeSecureFileAtomic } from "./utils/secure-fs.js";
 
 const ROOT = join(homedir(), ".c-agent", "sessions");
 
@@ -29,7 +29,7 @@ export class SessionStore {
   save(session: Session) {
     if (session.messages.length === 0) return; // don't litter empty sessions
     const file = join(this.dir, `${session.id}.json`);
-    writeSecureFile(file, JSON.stringify(session.toData())); // 0600 — may hold PII/secrets
+    writeSecureFileAtomic(file, JSON.stringify(session.toData())); // 0600 — may hold PII/secrets
   }
 
   delete(id: string): void {

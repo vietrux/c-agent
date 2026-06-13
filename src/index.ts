@@ -161,10 +161,12 @@ async function main() {
     pm,
     cwd,
     todos: [],
+    fileReads: new Map(),
     engine,
     checkpointer,
     skills,
     hooks,
+    provider,
   };
 
   // Build a subagent: fresh session + agent, optional role from an agent def.

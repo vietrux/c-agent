@@ -93,6 +93,14 @@ export class AnthropicProvider implements Provider {
       { signal },
     );
     stream.on("text", (d) => handlers.onText(d));
+    stream.on("contentBlock", (block) => {
+      if (block.type !== "tool_use") return;
+      handlers.onToolCallReady?.({
+        id: block.id,
+        name: block.name,
+        input: block.input,
+      });
+    });
 
     const final = await stream.finalMessage();
     let text = "";

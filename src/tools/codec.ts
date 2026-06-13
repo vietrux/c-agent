@@ -47,6 +47,9 @@ const HMACS: Record<string, (m: string, k: string) => CryptoJS.lib.WordArray> = 
 
 export const codecTool: Tool = {
   concurrencySafe: true,
+  defer: true,
+  searchHint:
+    "encoding decoding base64 hex url html jwt hash hmac pbkdf2 crypto encrypt decrypt xor rot13",
   spec: {
     name: "encode_decode",
     description:

@@ -2,6 +2,8 @@ import type { Tool } from "./registry.js";
 
 export const skillTool: Tool = {
   concurrencySafe: true,
+  defer: true,
+  searchHint: "load skill instructions procedure workflow specialized capability",
   spec: {
     name: "skill",
     description:

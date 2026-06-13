@@ -16,7 +16,13 @@ interface Rule {
 /** The string compared against a rule's argument matcher, per tool. */
 function ruleTarget(tool: string, input: any): string {
   if (tool === "bash") return String(input?.command ?? "");
-  if (input?.url) return String(input.url);
+  if (input?.url) {
+    try {
+      return new URL(String(input.url)).toString();
+    } catch {
+      return String(input.url);
+    }
+  }
   if (input?.path) return String(input.path);
   if (input?.pattern) return String(input.pattern);
   try {
@@ -139,6 +145,18 @@ export class PermissionEngine {
    * Multiline commands and env-var-prefixed commands return null.
    */
   suggestRule(tool: string, input: any): RuleSuggestion | null {
+    if (tool === "web_fetch") {
+      try {
+        const url = new URL(String(input?.url ?? ""));
+        return {
+          spec: `web_fetch(*://${url.hostname}/*)`,
+          label: url.hostname,
+        };
+      } catch {
+        return null;
+      }
+    }
+
     if (tool !== "bash") return null;
 
     const command = String(input?.command ?? "").trim();
