@@ -7,17 +7,46 @@ import type {
   StreamResult,
   ToolCall,
   Usage,
+  ProviderRequestParams,
 } from "./types.js";
+import {
+  applyRequestParams,
+  paramsForModel,
+  sanitizeModelParams,
+  sanitizeParams,
+} from "./params.js";
 
 export class AnthropicProvider implements Provider {
   private client: Anthropic;
-  model: string;
+  private _model: string;
+  private defaultParams: ProviderRequestParams;
+  private modelParams: Record<string, ProviderRequestParams>;
 
-  constructor(opts: { apiKey: string; baseURL?: string; model: string }) {
+  constructor(opts: {
+    apiKey: string;
+    baseURL?: string;
+    model: string;
+    params?: ProviderRequestParams;
+    modelParams?: Record<string, ProviderRequestParams>;
+  }) {
     // SDK retries transient failures (429/5xx/overloaded) with exponential
     // backoff and honors Retry-After; bumped above the default 2.
     this.client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 5 });
-    this.model = opts.model;
+    this._model = opts.model;
+    this.defaultParams = sanitizeParams(opts.params);
+    this.modelParams = sanitizeModelParams(opts.modelParams);
+  }
+
+  get model(): string {
+    return this._model;
+  }
+
+  set model(model: string) {
+    this._model = model;
+  }
+
+  getRequestParams(): ProviderRequestParams {
+    return paramsForModel(this.defaultParams, this.modelParams, this.model);
   }
 
   async listModels(): Promise<string[]> {
@@ -76,7 +105,7 @@ export class AnthropicProvider implements Provider {
     // Markers are ignored below the model's minimum cacheable size, so this is
     // always safe to send.
     applyCacheBreakpoint(wireMessages);
-    const stream = this.client.messages.stream(
+    const payload = applyRequestParams(
       {
         model: this.model,
         max_tokens: 8192,
@@ -90,8 +119,15 @@ export class AnthropicProvider implements Provider {
         })),
         messages: wireMessages,
       },
-      { signal },
+      this.getRequestParams(),
+      ["model", "messages", "system", "tools"],
     );
+    const stream = this.client.messages.stream(payload as any, { signal });
+    let reasoningEmitted = false;
+    stream.on("thinking", (d) => {
+      reasoningEmitted = true;
+      handlers.onReasoning?.(d);
+    });
     stream.on("text", (d) => handlers.onText(d));
     stream.on("contentBlock", (block) => {
       if (block.type !== "tool_use") return;
@@ -107,7 +143,9 @@ export class AnthropicProvider implements Provider {
     const toolCalls: ToolCall[] = [];
     for (const block of final.content) {
       if (block.type === "text") text += block.text;
-      else if (block.type === "tool_use") {
+      else if (block.type === "thinking") {
+        if (!reasoningEmitted) handlers.onReasoning?.(block.thinking);
+      } else if (block.type === "tool_use") {
         toolCalls.push({ id: block.id, name: block.name, input: block.input });
       }
     }

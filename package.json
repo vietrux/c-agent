@@ -17,7 +17,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "test": "npm run build && npm run test:scheduler && npm run test:file-safety && npm run test:web-fetch && npm run test:tool-search && npm run test:bash-classifier && npm run test:result-cap && npm run test:secure-fs && npm run test:grep && npm run test:tools",
+    "test": "npm run build && npm run test:provider && npm run test:scheduler && npm run test:file-safety && npm run test:web-fetch && npm run test:tool-search && npm run test:bash-classifier && npm run test:result-cap && npm run test:secure-fs && npm run test:grep && npm run test:tools",
     "test:scheduler": "tsx scheduler-test.mts",
     "test:file-safety": "tsx file-safety-test.mts",
     "test:web-fetch": "tsx web-fetch-test.mts",
@@ -33,7 +33,8 @@
     "build:pkg": "node scripts/build-pkg.mjs",
     "start": "node dist/index.js",
     "prepare": "npm run build",
-    "prepublishOnly": "rm -rf dist && tsc"
+    "prepublishOnly": "rm -rf dist && tsc",
+    "test:provider": "tsx provider-test.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",

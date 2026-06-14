@@ -8,7 +8,7 @@ import { ProcessManager } from "./process/manager.js";
 import { resolveProvider } from "./provider/index.js";
 import type { Provider } from "./provider/types.js";
 import { App } from "./tui/app.js";
-import { loadSettings } from "./settings.js";
+import { configuredModelIds, loadSettings } from "./settings.js";
 import { PermissionEngine, MODES, type Mode } from "./permissions.js";
 import { FileCheckpointer } from "./checkpoint.js";
 import { SessionStore } from "./store.js";
@@ -83,9 +83,10 @@ async function main() {
   // Build the set of selectable providers: the env default (e.g. NIM) plus any
   // configured in settings (`provider` = active, `providers` = extras). The
   // active provider backs the agent; the /model picker can switch among all.
-  const entries: { name: string; provider: Provider }[] = [];
-  const addEntry = (name: string, p: Provider) => {
-    if (!entries.some((e) => e.name === name)) entries.push({ name, provider: p });
+  const entries: { name: string; provider: Provider; configuredModels?: string[] }[] = [];
+  const configModels = configuredModelIds;
+  const addEntry = (name: string, p: Provider, configuredModels: string[] = []) => {
+    if (!entries.some((e) => e.name === name)) entries.push({ name, provider: p, configuredModels });
   };
 
   let active: Provider | undefined;
@@ -95,13 +96,13 @@ async function main() {
     if (settings.provider) {
       activeName = settings.provider.type ?? "default";
       active = resolveProvider(settings.provider).provider;
-      addEntry(activeName, active);
+      addEntry(activeName, active, configModels(settings.provider));
     }
     // `providers` are extras offered in /model; first one is active if no `provider`.
     for (const [name, cfg] of Object.entries(settings.providers)) {
       try {
         const p = resolveProvider(cfg).provider;
-        addEntry(name, p);
+        addEntry(name, p, configModels(cfg));
         if (!active) {
           active = p;
           activeName = name;

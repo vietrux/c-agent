@@ -1,7 +1,12 @@
 import { OpenAIProvider } from "./openai.js";
 import { AnthropicProvider } from "./anthropic.js";
 import type { Provider } from "./types.js";
-import type { ProviderConfig } from "../settings.js";
+import {
+  configuredModelParams,
+  providerModelId,
+  providerParams,
+  type ProviderConfig,
+} from "../settings.js";
 
 export * from "./types.js";
 
@@ -20,14 +25,22 @@ export interface ResolvedProvider {
 export function resolveProvider(cfg: ProviderConfig): ResolvedProvider {
   const type = cfg.type ?? "openai";
   const defaultKeyEnv = type === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
-  const apiKey = cfg.apiKey ?? process.env[cfg.apiKeyEnv ?? defaultKeyEnv];
-  if (!apiKey) {
+  const rawApiKey = cfg.apiKey ?? process.env[cfg.apiKeyEnv ?? defaultKeyEnv];
+  const noAuthCustomProvider = cfg.apiKey === "" && !!cfg.baseURL;
+  if (!rawApiKey && !noAuthCustomProvider) {
     throw new Error(
       `missing API key for provider "${type}" — set apiKey, apiKeyEnv, or ${defaultKeyEnv}`,
     );
   }
-  const model = cfg.model ?? "";
-  const opts = { apiKey, model, baseURL: cfg.baseURL };
+  const apiKey = rawApiKey || "local";
+  const model = providerModelId(cfg.model) ?? "";
+  const opts = {
+    apiKey,
+    model,
+    baseURL: cfg.baseURL,
+    params: providerParams(cfg),
+    modelParams: configuredModelParams(cfg),
+  };
   const provider =
     type === "anthropic" ? new AnthropicProvider(opts) : new OpenAIProvider(opts);
   return { provider, needsModel: !model };

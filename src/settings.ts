@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
+import type { ProviderRequestParams } from "./provider/types.js";
 
 export interface McpServerConfig {
   /** Transport. Inferred when omitted: `url` → http, else stdio. */
@@ -37,6 +38,13 @@ export type HookEvent =
   | "SessionStart";
 export type HookConfig = Partial<Record<HookEvent, HookDef[]>>;
 
+export interface ModelConfig {
+  id: string;
+  params?: ProviderRequestParams;
+}
+
+export type ModelEntryConfig = string | ModelConfig;
+
 export interface ProviderConfig {
   /** Wire format. openai = OpenAI-compatible (OpenAI, NIM, vLLM, local). */
   type?: "openai" | "anthropic";
@@ -45,7 +53,13 @@ export interface ProviderConfig {
   apiKey?: string;
   apiKeyEnv?: string;
   /** Omit to choose interactively from the provider's model list. */
-  model?: string;
+  model?: ModelEntryConfig;
+  /** Additional static model ids to show in the TUI picker. */
+  models?: ModelEntryConfig[];
+  /** Provider-specific defaults merged into every request payload. */
+  params?: ProviderRequestParams;
+  /** Provider-specific params keyed by model id. */
+  modelParams?: Record<string, ProviderRequestParams>;
 }
 
 export interface Settings {
@@ -56,6 +70,71 @@ export interface Settings {
   provider?: ProviderConfig;
   /** Extra named providers, shown grouped in the /model picker. */
   providers: Record<string, ProviderConfig>;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function uniqueStrings(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const id = item.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+export function providerModelId(model: ProviderConfig["model"]): string | undefined {
+  if (typeof model === "string") return model.trim() || undefined;
+  if (isPlainRecord(model) && typeof model.id === "string") return model.id.trim() || undefined;
+  return undefined;
+}
+
+export function configuredModelIds(cfg: ProviderConfig): string[] {
+  const ids: string[] = [];
+  const primary = providerModelId(cfg.model);
+  if (primary) ids.push(primary);
+  if (Array.isArray(cfg.models)) {
+    for (const model of cfg.models) {
+      const id = providerModelId(model);
+      if (id) ids.push(id);
+    }
+  }
+  if (isPlainRecord(cfg.modelParams)) ids.push(...Object.keys(cfg.modelParams));
+  return uniqueStrings(ids);
+}
+
+function mergeModelParam(
+  out: Record<string, ProviderRequestParams>,
+  id: string | undefined,
+  params: unknown,
+): void {
+  if (!id || !isPlainRecord(params)) return;
+  out[id] = { ...(out[id] ?? {}), ...params };
+}
+
+export function configuredModelParams(cfg: ProviderConfig): Record<string, ProviderRequestParams> {
+  const out: Record<string, ProviderRequestParams> = {};
+  if (isPlainRecord(cfg.modelParams)) {
+    for (const [id, params] of Object.entries(cfg.modelParams)) {
+      mergeModelParam(out, id.trim(), params);
+    }
+  }
+  if (isPlainRecord(cfg.model)) mergeModelParam(out, providerModelId(cfg.model), cfg.model.params);
+  if (Array.isArray(cfg.models)) {
+    for (const model of cfg.models) {
+      if (isPlainRecord(model)) mergeModelParam(out, providerModelId(model), model.params);
+    }
+  }
+  return out;
+}
+
+export function providerParams(cfg: ProviderConfig): ProviderRequestParams {
+  return isPlainRecord(cfg.params) ? { ...cfg.params } : {};
 }
 
 function readJson(path: string): any | null {

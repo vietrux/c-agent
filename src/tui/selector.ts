@@ -166,6 +166,11 @@ export class ModelSelector extends Container {
     this.listHost.addChild(this.list);
   }
 
+  setItems(items: RewindItem[]): void {
+    this.all = items;
+    this.rebuild();
+  }
+
   handleInput(data: string): void {
     if (
       matchesKey(data, Key.up) ||

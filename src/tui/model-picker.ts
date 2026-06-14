@@ -11,6 +11,7 @@ import { savePrefs } from "../prefs.js";
 export interface ProviderEntry {
   name: string;
   provider: Provider;
+  configuredModels?: string[];
 }
 
 /** The slice of App the model picker drives. */
@@ -39,67 +40,130 @@ function prettyProvider(name: string): string {
   );
 }
 
+function uniqueModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of models) {
+    const id = m.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function configuredModels(entry: ProviderEntry): string[] {
+  return uniqueModels([entry.provider.model, ...(entry.configuredModels ?? [])]);
+}
+
+export type ProviderListState = {
+  entry: ProviderEntry;
+  remoteModels: string[];
+  status: "pending" | "done";
+};
+
+export type ModelChoice = { entry: ProviderEntry; model: string | null };
+
+export function buildModelItems(states: ProviderListState[]): {
+  items: RewindItem[];
+  choices: ModelChoice[];
+} {
+  const choices: ModelChoice[] = [];
+  const items: RewindItem[] = [];
+
+  for (const state of states) {
+    const { entry } = state;
+    const pp = prettyProvider(entry.name);
+    const models = uniqueModels([...configuredModels(entry), ...state.remoteModels]);
+    if (models.length === 0) {
+      if (state.status === "pending") continue;
+      const ci = choices.length;
+      choices.push({ entry, model: null }); // manual entry
+      items.push({ index: ci, label: `⌨ enter a model id… (${pp})` });
+      continue;
+    }
+    for (const model of models) {
+      const ci = choices.length;
+      choices.push({ entry, model });
+      items.push({ index: ci, label: `${model} (${pp})` });
+    }
+  }
+
+  return { items, choices };
+}
+
 /** Fetches models from every configured provider and runs the /model picker. */
 export class ModelPicker {
   constructor(private host: ModelHost) {}
 
   /** Fetch models from every configured provider and let the user pick. */
-  async pick(): Promise<void> {
+  pick(): void {
     const host = this.host;
     if (host.busy) {
       host.view.addBlock(notice("can't switch model while the agent is working"));
       return;
     }
     const entries = host.providers;
-    host.view.setLoader("listing models…");
-    const lists = await Promise.all(
-      entries.map((e) =>
-        (e.provider.listModels ? e.provider.listModels() : Promise.resolve([])).then(
-          (models) => models,
-          () => [] as string[],
-        ),
-      ),
-    );
-    host.view.setLoader(null);
-
-    // Flat, searchable list; each row labelled `model (Provider)`. A provider
-    // whose list endpoint is empty/unavailable still appears: it falls back to
-    // its configured model, or a "type a model id" row so it stays selectable.
-    const items: RewindItem[] = [];
-    const choices: { entry: ProviderEntry; model: string | null }[] = [];
-    entries.forEach((entry, gi) => {
-      let models = lists[gi];
-      if (models.length === 0 && entry.provider.model) models = [entry.provider.model];
-      const pp = prettyProvider(entry.name);
-      if (models.length === 0) {
-        const ci = choices.length;
-        choices.push({ entry, model: null }); // manual entry
-        items.push({ index: ci, label: `⌨ enter a model id… (${pp})` });
-        return;
-      }
-      for (const model of models) {
-        const ci = choices.length;
-        choices.push({ entry, model });
-        items.push({ index: ci, label: `${model} (${pp})` });
-      }
-    });
-
-    if (choices.length === 0) {
+    if (entries.length === 0) {
       host.view.addBlock(notice("no providers available — check ~/.c-agent/settings.json"));
       return;
     }
 
+    host.view.setLoader("listing models…");
+
+    // Flat, searchable list; each row labelled `model (Provider)`. A provider
+    // whose list endpoint is empty/unavailable still appears: it falls back to
+    // its configured model, or a "type a model id" row so it stays selectable.
+    const states: ProviderListState[] = entries.map((entry) => ({
+      entry,
+      remoteModels: [],
+      status: entry.provider.listModels ? "pending" : "done",
+    }));
+    let cancelled = false;
+    let choices: ModelChoice[] = [];
+
+    const buildItems = (): RewindItem[] => {
+      const built = buildModelItems(states);
+      choices = built.choices;
+      return built.items;
+    };
+
     const selector = new ModelSelector(
-      items,
+      buildItems(),
       (i) => {
+        cancelled = true;
+        host.view.setLoader(null);
         const { entry, model } = choices[i];
         host.slot.restore();
         if (model === null) this.promptModelId(entry);
         else this.applyModel(entry, model);
       },
-      () => host.slot.restore(),
+      () => {
+        cancelled = true;
+        host.view.setLoader(null);
+        host.slot.restore();
+      },
     );
     host.slot.swap(selector);
+
+    const tasks = states.map(async (state) => {
+      if (!state.entry.provider.listModels) return;
+      try {
+        state.remoteModels = await state.entry.provider.listModels();
+      } catch {
+        state.remoteModels = [];
+      } finally {
+        state.status = "done";
+        if (!cancelled) {
+          selector.setItems(buildItems());
+          host.tui.requestRender();
+        }
+      }
+    });
+
+    void Promise.all(tasks).finally(() => {
+      if (!cancelled) host.view.setLoader(null);
+    });
   }
 
   /** Switch to a provider+model, persist the choice, refresh UI. */

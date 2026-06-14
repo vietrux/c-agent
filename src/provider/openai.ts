@@ -7,18 +7,47 @@ import type {
   StreamResult,
   ToolCall,
   Usage,
+  ProviderRequestParams,
 } from "./types.js";
+import {
+  applyRequestParams,
+  paramsForModel,
+  sanitizeModelParams,
+  sanitizeParams,
+} from "./params.js";
 
 /** OpenAI-compatible provider. Works with OpenAI, NVIDIA NIM, vLLM, etc. */
 export class OpenAIProvider implements Provider {
   private client: OpenAI;
-  model: string;
+  private _model: string;
+  private defaultParams: ProviderRequestParams;
+  private modelParams: Record<string, ProviderRequestParams>;
 
-  constructor(opts: { apiKey: string; baseURL?: string; model: string }) {
+  constructor(opts: {
+    apiKey: string;
+    baseURL?: string;
+    model: string;
+    params?: ProviderRequestParams;
+    modelParams?: Record<string, ProviderRequestParams>;
+  }) {
     // SDK retries transient failures (429/5xx/network) with exponential backoff
     // and honors Retry-After; bumped above the default 2 for flaky proxies.
     this.client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 5 });
-    this.model = opts.model;
+    this._model = opts.model;
+    this.defaultParams = sanitizeParams(opts.params);
+    this.modelParams = sanitizeModelParams(opts.modelParams);
+  }
+
+  get model(): string {
+    return this._model;
+  }
+
+  set model(model: string) {
+    this._model = model;
+  }
+
+  getRequestParams(): ProviderRequestParams {
+    return paramsForModel(this.defaultParams, this.modelParams, this.model);
   }
 
   async listModels(): Promise<string[]> {
@@ -72,7 +101,7 @@ export class OpenAIProvider implements Provider {
     handlers: StreamHandlers,
     signal?: AbortSignal,
   ): Promise<StreamResult> {
-    const stream = await this.client.chat.completions.create(
+    const payload = applyRequestParams(
       {
         model: this.model,
         messages: this.toWire(system, messages),
@@ -85,8 +114,12 @@ export class OpenAIProvider implements Provider {
         stream: true,
         stream_options: { include_usage: true },
       },
-      { signal },
+      this.getRequestParams(),
+      ["model", "messages", "tools", "stream", "stream_options"],
     );
+    const stream = (await this.client.chat.completions.create(payload as any, {
+      signal,
+    })) as unknown as AsyncIterable<any>;
 
     const usage: Usage = { input: 0, output: 0, cached: 0 };
     let text = "";
@@ -101,7 +134,9 @@ export class OpenAIProvider implements Provider {
       }
       const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
-      const reasoning = (delta as any).reasoning_content as string | undefined;
+      const reasoning = ((delta as any).reasoning_content ?? (delta as any).reasoning) as
+        | string
+        | undefined;
       if (reasoning) handlers.onReasoning?.(reasoning);
       if (delta.content) {
         text += delta.content;

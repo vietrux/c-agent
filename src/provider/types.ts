@@ -42,6 +42,8 @@ export interface StreamResult {
   usage: Usage;
 }
 
+export type ProviderRequestParams = Record<string, any>;
+
 /** A model backend. Owns conversion from neutral transcript to its wire format. */
 export interface Provider {
   model: string; // mutable: may be chosen/switched at runtime
@@ -52,6 +54,8 @@ export interface Provider {
     handlers: StreamHandlers,
     signal?: AbortSignal,
   ): Promise<StreamResult>;
+  /** Current provider-specific request params for the selected model. */
+  getRequestParams?(): ProviderRequestParams;
   /** List selectable model ids, if the backend supports it. */
   listModels?(): Promise<string[]>;
 }

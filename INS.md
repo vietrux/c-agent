@@ -59,7 +59,28 @@ Create `~/.c-agent/settings.json`:
       "type": "openai",
       "baseURL": "https://integrate.api.nvidia.com/v1",
       "apiKey": "nvapi-...",
-      "model": "minimaxai/minimax-m2.7"
+      "model": "minimaxai/minimax-m2.7",
+      "params": {
+        "temperature": 0.2,
+        "top_p": 0.95
+      },
+      "models": [
+        "minimaxai/minimax-m2.7",
+        {
+          "id": "nvidia/llama-3.3-nemotron-super-49b-v1",
+          "params": {
+            "temperature": 0.4,
+            "reasoning_effort": "high",
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1
+          }
+        }
+      ],
+      "modelParams": {
+        "minimaxai/minimax-m2.7": {
+          "reasoning": { "effort": "medium" }
+        }
+      }
     },
     "anthropic": {
       "type": "anthropic",
@@ -79,13 +100,27 @@ Provider fields:
 | ----------- | -------------------------------------------------------------- |
 | `type`      | `openai` (OpenAI-compatible: OpenAI, NIM, vLLM, local) or `anthropic` |
 | `baseURL`   | API base URL (optional for hosted OpenAI/Anthropic)            |
-| `apiKey`    | key inline, **or**                                             |
+| `apiKey`    | key inline; use `""` only for custom no-auth `baseURL` providers, **or** |
 | `apiKeyEnv` | name of an env var holding the key (preferred)                 |
 | `model`     | model id; omit to pick interactively in the TUI               |
+| `models`    | extra static model ids to show in `/model`; entries can be strings or `{ "id", "params" }` objects |
+| `params`    | provider-specific request params merged into every request      |
+| `modelParams` | provider-specific request params keyed by model id            |
 
 - `provider` (single object) = the active backend.
 - `providers` (named map) = selectable backends; the first is active if no `provider` is set.
 - Precedence for the active model: `--model` flag > last `/model` choice > config `model`.
+- `/model` merges provider-listed models with `model` and `models`, so configured
+  model ids remain selectable even if a provider list endpoint is slow, empty,
+  or does not return that id.
+- Request params are passed through to the provider payload. Use `params` for
+  defaults and `modelParams` or inline `models[].params` for model-specific
+  overrides such as `temperature`, `top_p`, `presence_penalty`,
+  `frequency_penalty`, `reasoning`, `reasoning_effort`, Anthropic
+  `thinking`, or Ollama `think`.
+- Ollama's Anthropic-compatible endpoint can return thinking blocks directly;
+  c-agent surfaces those in the TUI thinking panel. Ollama's OpenAI-compatible
+  endpoint streams thinking as `delta.reasoning`, which c-agent also surfaces.
 
 ## Run
 

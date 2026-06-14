@@ -4,6 +4,7 @@ import type {
   ToolSpec,
   StreamHandlers,
   StreamResult,
+  ProviderRequestParams,
 } from "./types.js";
 import {
   StreamRestorer,
@@ -37,6 +38,10 @@ export class RedactingProvider implements Provider {
   /** Swap the backing provider (used to switch between configured providers). */
   setInner(p: Provider) {
     this.inner = p;
+  }
+
+  getRequestParams(): ProviderRequestParams {
+    return this.inner.getRequestParams ? this.inner.getRequestParams() : {};
   }
 
   listModels(): Promise<string[]> {
