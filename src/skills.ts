@@ -10,11 +10,15 @@ export interface Skill {
 }
 
 function skillDirs(cwd: string): string[] {
-  return [join(homedir(), ".c-agent", "skills"), join(cwd, ".c-agent", "skills")];
+  return [
+    join(homedir(), ".c-agent", "skills"),
+    join(cwd, ".c-agent", "skills"),
+    join(homedir(), ".agents", "skills"),
+  ];
 }
 
 /**
- * Discover skills from ~/.c-agent/skills/<name>/SKILL.md and <cwd>/.c-agent/skills/...
+ * Discover skills from ~/.c-agent/skills/<name>/SKILL.md and <cwd>/.c-agent/skills/... and ~/.agents/skills/
  * Project skills override same-named user skills.
  */
 export function loadSkills(cwd: string): Skill[] {
@@ -25,7 +29,9 @@ export function loadSkills(cwd: string): Skill[] {
       const skillFile = join(dir, entry, "SKILL.md");
       if (!existsSync(skillFile) || !statSync(skillFile).isFile()) continue;
       try {
-        const { meta, body } = parseFrontmatter(readFileSync(skillFile, "utf8"));
+        const { meta, body } = parseFrontmatter(
+          readFileSync(skillFile, "utf8"),
+        );
         const name = meta.name || entry;
         byName.set(name, { name, description: meta.description || "", body });
       } catch {
