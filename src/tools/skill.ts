@@ -36,8 +36,10 @@ function normalizeSkillNames(input: any): { names: string[]; invalid: string[] }
 
 export const skillTool: Tool = {
   concurrencySafe: true,
-  defer: true,
-  searchHint: "load one or more skill instructions procedure workflow specialized capability compose multiple skills",
+  // Not deferred: the system prompt's <skills> block tells the model to call this
+  // tool directly, so it must be in the schema whenever skills exist (it's only
+  // registered then). Hiding it behind tool_search created an undocumented
+  // activate-first dance that weaker models loop on instead of completing.
   spec: {
     name: "skill",
     description:

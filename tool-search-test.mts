@@ -57,16 +57,13 @@ await test("select activates a deferred tool for subsequent specs", async () => 
   assert.equal(registry.specs().some((s) => s.name === "web_fetch"), true);
 });
 
-await test("tool_search sees deferred tools registered after creation", async () => {
+await test("skill tool is directly available, not hidden behind tool_search", async () => {
   const registry = buildRegistry();
   registry.register(skillTool);
-  const result = await registry.dispatch(
-    "tool_search",
-    { query: "skill workflow" },
-    ctx,
-  );
-  assert.equal(result.isError, undefined);
-  assert.match(result.text, /skill/);
+  // The system prompt advertises `skill`, so it must be in the default schema
+  // (no activate-first dance) whenever skills are registered.
+  assert.equal(registry.specs().some((s) => s.name === "skill"), true);
+  assert.equal(registry.searchDeferred("skill workflow", 3).length, 0);
 });
 
 pm.killAll();

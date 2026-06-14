@@ -10,6 +10,27 @@ import {
 import { t, markdownTheme } from "./themes.js";
 import type { ToolEventInfo } from "../tools/scheduler.js";
 
+/**
+ * Strip bytes that desync pi-tui's differential renderer. External output
+ * (curl -v, router JSON over HTTP, build logs) carries embedded ANSI escape
+ * sequences, OSC/DCS strings, and C0 control chars — including bare CR and
+ * cursor moves. pi-tui computes each line's display width assuming plain text,
+ * so these bytes shift the real cursor without changing the computed width,
+ * leaving stale glyphs, broken borders, and content bleeding across rows.
+ * Normalize line breaks and remove everything that isn't printable text, \n, or
+ * \t before the string ever reaches a Text/Markdown block. The app's own
+ * coloring is applied AFTER this, so legitimate styling is unaffected.
+ */
+export function sanitizeForDisplay(s: string): string {
+  return s
+    .replace(/\r\n?/g, "\n") // CRLF / lone CR → LF (HTTP, curl progress)
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "") // OSC ... BEL/ST
+    .replace(/\x1b[P^_][\s\S]*?\x1b\\/g, "") // DCS / PM / APC ... ST
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "") // CSI (colors, cursor moves)
+    .replace(/\x1b[@-Z\\-_O]/g, "") // 2-char escapes (Fe) + SS3 intro
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ""); // leftover C0 + DEL (keep \t,\n)
+}
+
 /** Full-width horizontal rule that adapts to viewport width. */
 export class DynamicBorder implements Component {
   constructor(private color: (s: string) => string = t.border) {}
@@ -63,7 +84,7 @@ export class ReasoningBlock implements Component {
     return [" " + header, ...visible.map((l) => " " + t.dim(t.italic(l)))];
   }
   append(delta: string) {
-    this.buf += delta;
+    this.buf += sanitizeForDisplay(delta);
   }
   finish() {
     this.done = true;
@@ -167,7 +188,7 @@ export class ToolBlock extends Container {
   }
 
   setResult(output: string, isError: boolean) {
-    this.output = output;
+    this.output = sanitizeForDisplay(output);
     this.state = isError ? "error" : "success";
     this.refresh();
   }
@@ -185,7 +206,11 @@ export function notice(text: string): Component {
 
 /** Harness-injected context block (e.g. background-task updates). */
 export function noteBlock(content: string): Component {
-  return new Text(t.dim(t.italic("⟳ context")) + "\n" + t.muted(content), 1, 0);
+  return new Text(
+    t.dim(t.italic("⟳ context")) + "\n" + t.muted(sanitizeForDisplay(content)),
+    1,
+    0,
+  );
 }
 
 export function clampLine(s: string, width: number): string {
