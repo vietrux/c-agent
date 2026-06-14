@@ -472,8 +472,9 @@ function buildSystem(
   if (skills && skills.length > 0) {
     const list = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
     prompt +=
-      `\n\n<skills>\nThese skills are available. When a task matches one, call the \`skill\` tool ` +
-      `with its name to load full instructions BEFORE proceeding.\n${list}\n</skills>`;
+      `\n\n<skills>\nThese skills are available. When a task matches one or more skills, call the \`skill\` tool ` +
+      `to load full instructions BEFORE proceeding. If multiple skills match, load them together with ` +
+      `\`names: [...]\` and compose their instructions for the task.\n${list}\n</skills>`;
   }
 
   for (const name of ["CAGENT.md", "AGENTS.md"]) {
