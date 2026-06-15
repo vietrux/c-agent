@@ -186,54 +186,6 @@ function toolsSection(toolNames: string[]): string | null {
   return ["# Using your tools", ...bullets.map((b) => `- ${b}`)].join("\n");
 }
 
-/**
- * Attack-methodology guidance for offensive security sessions.
- * Only included when `bash` is available (required to run security tools).
- */
-function cybersecAttackSection(toolNames: string[]): string | null {
-  const has = (n: string) => toolNames.includes(n);
-  if (!has("bash")) return null;
-
-  const hasWrite = has("write") || has("edit");
-  return [
-    "# Offensive security workflow",
-    "",
-    "**Recon & discovery:**",
-    "- Port/service scanning: `nmap -sV -sC -oA scans/initial <target>`, `masscan`, `rustscan`",
-    "- Web: `whatweb`, `httpx -tech-detect`, `wapiti`; DNS/subdomain: `subfinder`, `amass`, `dnsx`",
-    "- Crawling / OSINT: `gau`, `waybackurls`, `hakrawler`, `whois`, `curl` on passive sources",
-    "- Pipe results to files: `nmap ... | tee evidence/recon/nmap.txt`",
-    "",
-    "**Web application testing:**",
-    "- Directory / file fuzzing: `ffuf -u https://TARGET/FUZZ -w /usr/share/wordlists/...`",
-    "- Vuln scanning: `nuclei -u TARGET -t ~/nuclei-templates/`",
-    "- SQLi: `sqlmap -u URL --batch --level 2` (detection only until authorized to extract)",
-    "- Auth testing: `hydra`, `medusa` — confirm rate-limit and lockout policy first",
-    "- XSS / SSTI: test with benign payloads first, escalate only with explicit authorization",
-    "",
-    "**Exploitation:**",
-    "- Metasploit (non-interactive): `msfconsole -q -x 'use exploit/...; set RHOSTS ...; run; exit'`",
-    "- Payload generation: `msfvenom -p ... LHOST=... LPORT=... -f elf -o payload.elf`",
-    hasWrite ? "- Write custom exploit scripts with `write`, then `bash` to execute" : "",
-    "- Impacket suite: `impacket-psexec`, `impacket-secretsdump`, `impacket-getTGT`",
-    "",
-    "**Post-exploitation:**",
-    "- Linux enumeration: upload and run `linpeas.sh`; collect `/etc/passwd`, sudo rights, SUID binaries",
-    "- Windows enumeration: `winpeas.exe`, BloodHound ingestors, `net user /domain`",
-    "- File staging: `python3 -m http.server 8080` in the payload directory",
-    "- Lateral movement: `evil-winrm`, `ssh` with harvested keys, pass-the-hash",
-    "",
-    "**Evidence & reporting:**",
-    "- Organize: `mkdir -p evidence/{recon,web,exploitation,postex,loot}`",
-    "- Capture everything: `command 2>&1 | tee evidence/<phase>/<tool>.txt`",
-    hasWrite
-      ? "- Maintain `findings.md` with `write`/`edit`: title, CVSS severity, description, PoC steps, remediation"
-      : "- Maintain `findings.md`: title, CVSS severity, description, PoC steps, remediation",
-    "- Reference stored evidence files in the final report for reproducibility",
-  ]
-    .filter((l) => l !== "")
-    .join("\n");
-}
 
 function subagentNotesSection(): string {
   return [
@@ -275,7 +227,6 @@ export async function buildSystemPrompt(opts: SystemPromptOptions): Promise<stri
     opts.behavior,
     opts.subagent ? subagentNotesSection() : null,
     toolsSection(opts.toolNames),
-    opts.subagent ? null : cybersecAttackSection(opts.toolNames),
     skillsSection(opts.skills),
     environmentSection(opts, gitInfo),
     projectInstructions(opts.cwd),
