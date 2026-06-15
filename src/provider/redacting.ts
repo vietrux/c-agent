@@ -35,6 +35,10 @@ export class RedactingProvider implements Provider {
     this.inner.model = m;
   }
 
+  get kind(): Provider["kind"] {
+    return this.inner.kind;
+  }
+
   /** Swap the backing provider (used to switch between configured providers). */
   setInner(p: Provider) {
     this.inner = p;
@@ -42,6 +46,10 @@ export class RedactingProvider implements Provider {
 
   getRequestParams(): ProviderRequestParams {
     return this.inner.getRequestParams ? this.inner.getRequestParams() : {};
+  }
+
+  setRuntimeParams(patch: ProviderRequestParams): void {
+    this.inner.setRuntimeParams?.(patch);
   }
 
   listModels(): Promise<string[]> {

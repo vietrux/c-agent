@@ -11,19 +11,13 @@ import {
   ReasoningBlock,
   ToolBlock,
   UserMessage,
+  SPINNER_FRAMES,
+  toolArgPreview,
   notice,
   noteBlock,
 } from "./components.js";
 import type { AgentEvents } from "../agent.js";
 import { Session, stripInjected } from "../session.js";
-
-function compactJson(v: any): string {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
 
 /**
  * Owns the scrolling transcript: the rendered block list, the live
@@ -44,6 +38,12 @@ export class TranscriptView {
   private liveAssistant: { md: Markdown; buf: string } | null = null;
   private liveReasoning: ReasoningBlock | null = null;
   private toolBlocks = new Map<string, ToolBlock>(); // tool id → block (parallel dispatch)
+
+  // Animated spinner shared by all running tool blocks (see startSpinner).
+  private runningTools = new Set<string>();
+  private spinnerFrame = 0;
+  private spinnerTimer: ReturnType<typeof setInterval> | null = null;
+  private spinnerGlyph = () => SPINNER_FRAMES[this.spinnerFrame];
 
   private showReasoning = process.env.C_AGENT_SHOW_REASONING !== "0";
   private toolsExpanded = false; // Ctrl+O: full tool output
@@ -98,6 +98,27 @@ export class TranscriptView {
       this.loader.setMessage(text);
     }
     this.tui.requestRender();
+  }
+
+  // ---- tool spinner (animation while tools run) ---------------------------
+
+  /** Begin animating; ticks every running tool block's icon until none remain. */
+  private startSpinner() {
+    if (this.spinnerTimer) return;
+    this.spinnerTimer = setInterval(() => {
+      this.spinnerFrame = (this.spinnerFrame + 1) % SPINNER_FRAMES.length;
+      for (const id of this.runningTools) this.toolBlocks.get(id)?.tick();
+      this.tui.requestRender();
+    }, 80);
+    // Don't keep the process alive solely for the spinner.
+    this.spinnerTimer.unref?.();
+  }
+
+  private stopSpinner() {
+    if (this.spinnerTimer) {
+      clearInterval(this.spinnerTimer);
+      this.spinnerTimer = null;
+    }
   }
 
   // ---- turn bookkeeping (for /rewind, /new) -------------------------------
@@ -190,9 +211,7 @@ export class TranscriptView {
       },
       toolQueued: (id, name, input, info) => {
         this.setLoader(null);
-        const arg =
-          name === "bash" ? String(input.command ?? "") : compactJson(input);
-        const tb = new ToolBlock(name, arg);
+        const tb = new ToolBlock(name, toolArgPreview(name, input), this.spinnerGlyph);
         tb.setExpanded(this.toolsExpanded);
         tb.setMeta(info);
         this.toolBlocks.set(id, tb);
@@ -202,15 +221,15 @@ export class TranscriptView {
         this.setLoader(null);
         let tb = this.toolBlocks.get(id);
         if (!tb) {
-          const arg =
-            name === "bash" ? String(input.command ?? "") : compactJson(input);
-          tb = new ToolBlock(name, arg); // full body — never truncate the call
+          tb = new ToolBlock(name, toolArgPreview(name, input), this.spinnerGlyph);
           tb.setExpanded(this.toolsExpanded);
           this.toolBlocks.set(id, tb);
           this.addSpaced(tb);
         }
         if (info) tb.setMeta(info);
         tb.start();
+        this.runningTools.add(id);
+        this.startSpinner();
         this.tui.requestRender();
       },
       toolEnd: (id, result, isError, info) => {
@@ -218,6 +237,8 @@ export class TranscriptView {
         if (info) tb?.setMeta(info);
         tb?.setResult(result, isError);
         this.toolBlocks.delete(id);
+        this.runningTools.delete(id);
+        if (this.runningTools.size === 0) this.stopSpinner();
         this.tui.requestRender();
       },
       status: (s) => {
@@ -226,6 +247,8 @@ export class TranscriptView {
       },
       interrupted: () => {
         this.setLoader(null);
+        this.runningTools.clear();
+        this.stopSpinner();
         this.liveAssistant = null;
         if (this.liveReasoning) {
           this.liveReasoning.finish();
@@ -263,11 +286,7 @@ export class TranscriptView {
       } else if (m.role === "assistant") {
         if (m.content) this.addSpaced(new Markdown(m.content, 1, 0, markdownTheme));
         for (const tc of m.toolCalls) {
-          const arg =
-            tc.name === "bash"
-              ? String(tc.input?.command ?? "")
-              : compactJson(tc.input);
-          const tb = new ToolBlock(tc.name, arg); // full body — never truncate the call
+          const tb = new ToolBlock(tc.name, toolArgPreview(tc.name, tc.input));
           tb.setExpanded(this.toolsExpanded);
           this.addSpaced(tb);
           idToBlock.set(tc.id, tb);

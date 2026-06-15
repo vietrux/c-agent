@@ -47,6 +47,8 @@ export type ProviderRequestParams = Record<string, any>;
 /** A model backend. Owns conversion from neutral transcript to its wire format. */
 export interface Provider {
   model: string; // mutable: may be chosen/switched at runtime
+  /** Wire dialect, so UIs can shape provider-specific params (e.g. /effort). */
+  readonly kind?: "openai" | "anthropic";
   stream(
     system: string,
     messages: NeutralMessage[],
@@ -56,6 +58,12 @@ export interface Provider {
   ): Promise<StreamResult>;
   /** Current provider-specific request params for the selected model. */
   getRequestParams?(): ProviderRequestParams;
+  /**
+   * Merge a runtime override into the request params (highest precedence, above
+   * config defaults and per-model params). Used by /effort to tune reasoning at
+   * runtime. Shallow per top-level key.
+   */
+  setRuntimeParams?(patch: ProviderRequestParams): void;
   /** List selectable model ids, if the backend supports it. */
   listModels?(): Promise<string[]>;
 }

@@ -93,6 +93,28 @@ export class ReasoningBlock implements Component {
 
 export type ToolState = "queued" | "running" | "success" | "error";
 
+/** Braille spinner frames — same set pi-tui's Loader uses for the thinking line. */
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+const MAX_TOOL_ARG_CHARS = 1000;
+
+/** One-line preview of a tool call's input, capped to 1000 chars for display. */
+export function toolArgPreview(name: string, input: any): string {
+  let raw: string;
+  if (name === "bash") {
+    raw = String(input?.command ?? "");
+  } else {
+    try {
+      raw = JSON.stringify(input) ?? String(input);
+    } catch {
+      raw = String(input);
+    }
+  }
+  return raw.length > MAX_TOOL_ARG_CHARS
+    ? raw.slice(0, MAX_TOOL_ARG_CHARS) + ` … (+${raw.length - MAX_TOOL_ARG_CHARS} chars)`
+    : raw;
+}
+
 /** Tool execution block: state-colored background box, title line + output. */
 export class ToolBlock extends Container {
   private box: Box;
@@ -106,6 +128,8 @@ export class ToolBlock extends Container {
   constructor(
     private name: string,
     private argPreview: string,
+    // Animated frame source while running; falls back to a static glyph.
+    private spinner?: () => string,
   ) {
     super();
     this.box = new Box(1, 0, t.toolPendingBg);
@@ -114,6 +138,11 @@ export class ToolBlock extends Container {
     this.box.addChild(this.titleText);
     this.addChild(this.box);
     this.refresh();
+  }
+
+  /** Re-render the title so the running spinner advances a frame. */
+  tick() {
+    if (this.state === "running") this.refresh();
   }
 
   private bgFor(): (s: string) => string {
@@ -128,7 +157,7 @@ export class ToolBlock extends Container {
     return this.state === "queued"
       ? "□"
       : this.state === "running"
-        ? "▷"
+        ? (this.spinner ? this.spinner() : "▷")
         : this.state === "error"
           ? "✗"
           : "✓";

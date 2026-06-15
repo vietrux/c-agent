@@ -18,10 +18,13 @@ import {
 
 /** OpenAI-compatible provider. Works with OpenAI, NVIDIA NIM, vLLM, etc. */
 export class OpenAIProvider implements Provider {
+  readonly kind = "openai" as const;
   private client: OpenAI;
   private _model: string;
   private defaultParams: ProviderRequestParams;
   private modelParams: Record<string, ProviderRequestParams>;
+  // Runtime overrides (e.g. /effort) — highest precedence, not persisted.
+  private runtimeParams: ProviderRequestParams = {};
 
   constructor(opts: {
     apiKey: string;
@@ -46,7 +49,14 @@ export class OpenAIProvider implements Provider {
   }
 
   getRequestParams(): ProviderRequestParams {
-    return paramsForModel(this.defaultParams, this.modelParams, this.model);
+    return {
+      ...paramsForModel(this.defaultParams, this.modelParams, this.model),
+      ...this.runtimeParams,
+    };
+  }
+
+  setRuntimeParams(patch: ProviderRequestParams): void {
+    Object.assign(this.runtimeParams, sanitizeParams(patch));
   }
 
   async listModels(): Promise<string[]> {

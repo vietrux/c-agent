@@ -428,6 +428,10 @@ export class App {
             description: "Pick the model from the provider's list",
           },
           {
+            name: "effort",
+            description: "Set reasoning effort (minimal…max)",
+          },
+          {
             name: "undercover",
             description: "Toggle PII masking before sending to the model",
           },
@@ -457,6 +461,11 @@ export class App {
       turns: () => this.session.checkpoints.length,
       cwd: () => process.cwd(),
       usage: () => this.agent.lastUsage,
+      context: () => ({
+        used: this.agent.contextTokens(),
+        limit: this.agent.contextLimit(),
+      }),
+      effort: () => this.agent.currentEffort(),
     });
 
     // layout (top → bottom). Editor draws its own top/bottom borders.

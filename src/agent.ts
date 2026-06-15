@@ -179,6 +179,59 @@ export class Agent {
     return this.provider.listModels ? this.provider.listModels() : [];
   }
 
+  /** Token budget for the context window (footer % + compaction trigger). */
+  contextLimit(): number {
+    return CONTEXT_TOKENS;
+  }
+
+  // Valid reasoning levels per wire dialect.
+  private static readonly EFFORT_LEVELS: Record<string, readonly string[]> = {
+    openai: ["minimal", "low", "medium", "high", "xhigh", "max"],
+    anthropic: ["low", "medium", "high", "xhigh", "max"],
+  };
+
+  /**
+   * Set the reasoning effort for the active provider. Maps to `reasoning_effort`
+   * (OpenAI) or `output_config.config` (Anthropic). Returns a status string for
+   * the UI; does not throw on bad input.
+   */
+  setEffort(level: string): string {
+    const kind = this.provider.kind;
+    const value = level.trim().toLowerCase();
+    if (!kind || !this.provider.setRuntimeParams) {
+      return "the active provider doesn't support /effort";
+    }
+    const allowed = Agent.EFFORT_LEVELS[kind];
+    if (!allowed) return "the active provider doesn't support /effort";
+    if (!value) {
+      return `usage: /effort <${allowed.join("|")}>  (current: ${this.currentEffort() ?? "default"})`;
+    }
+    if (!allowed.includes(value)) {
+      return `invalid effort '${value}' — choose: ${allowed.join(", ")}`;
+    }
+    if (kind === "openai") {
+      this.provider.setRuntimeParams({ reasoning_effort: value });
+    } else {
+      this.provider.setRuntimeParams({ output_config: { config: value } });
+    }
+    return `effort set to ${value}`;
+  }
+
+  /** Current reasoning effort, or null if left at the provider default. */
+  currentEffort(): string | null {
+    const params = this.provider.getRequestParams?.() ?? {};
+    if (this.provider.kind === "openai") {
+      return typeof params.reasoning_effort === "string"
+        ? params.reasoning_effort
+        : null;
+    }
+    if (this.provider.kind === "anthropic") {
+      const cfg = params.output_config?.config;
+      return typeof cfg === "string" ? cfg : null;
+    }
+    return null;
+  }
+
   constructor(
     private session: Session,
     private registry: ToolRegistry,

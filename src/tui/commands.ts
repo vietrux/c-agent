@@ -48,23 +48,31 @@ export function handleCommand(host: CommandHost, line: string): void {
     case "/model":
       host.pickModel();
       break;
+    case "/effort":
+      host.view.addBlock(notice(host.agent.setEffort(arg)));
+      host.tui.requestRender();
+      break;
     case "/bg":
       host.openBgTasks();
       break;
     case "/mcp":
       host.view.addBlock(notice(host.mcpSummary));
       break;
-    case "/context":
+    case "/context": {
+      const used = host.agent.contextTokens();
+      const limit = host.agent.contextLimit();
+      const pct = limit > 0 ? Math.round((used / limit) * 100) : 0;
       host.view.addBlock(
         notice(
-          `~${host.agent.contextTokens().toLocaleString()} tokens · ${host.session.messages.length} messages`,
+          `~${used.toLocaleString()} / ${limit.toLocaleString()} tokens (${pct}%) · ${host.session.messages.length} messages`,
         ),
       );
       break;
+    }
     case "/help":
       host.view.addBlock(
         notice(
-          "/resume  /rewind  /compact  /model  /undercover [on|off]  /bg  /mcp  /context  /new  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
+          "/resume  /rewind  /compact  /model  /effort <level>  /undercover [on|off]  /bg  /mcp  /context  /new  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
         ),
       );
       break;

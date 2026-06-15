@@ -17,10 +17,13 @@ import {
 } from "./params.js";
 
 export class AnthropicProvider implements Provider {
+  readonly kind = "anthropic" as const;
   private client: Anthropic;
   private _model: string;
   private defaultParams: ProviderRequestParams;
   private modelParams: Record<string, ProviderRequestParams>;
+  // Runtime overrides (e.g. /effort) — highest precedence, not persisted.
+  private runtimeParams: ProviderRequestParams = {};
 
   constructor(opts: {
     apiKey: string;
@@ -45,7 +48,14 @@ export class AnthropicProvider implements Provider {
   }
 
   getRequestParams(): ProviderRequestParams {
-    return paramsForModel(this.defaultParams, this.modelParams, this.model);
+    return {
+      ...paramsForModel(this.defaultParams, this.modelParams, this.model),
+      ...this.runtimeParams,
+    };
+  }
+
+  setRuntimeParams(patch: ProviderRequestParams): void {
+    Object.assign(this.runtimeParams, sanitizeParams(patch));
   }
 
   async listModels(): Promise<string[]> {

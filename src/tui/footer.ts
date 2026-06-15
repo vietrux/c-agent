@@ -12,6 +12,8 @@ export interface FooterData {
   turns(): number;
   cwd(): string;
   usage(): { input: number; output: number; cached: number };
+  context(): { used: number; limit: number }; // context-window occupancy
+  effort(): string | null; // active reasoning effort, if overridden
 }
 
 function fmtTokens(n: number): string {
@@ -43,6 +45,13 @@ export class Footer implements Component {
         ? t.dim(`  ·  ↑${fmtTokens(u.input)} ↓${fmtTokens(u.output)}`) +
           (u.cached ? t.dim(` (cache ${fmtTokens(u.cached)})`) : "")
         : "";
+    const { used, limit } = this.data.context();
+    const pct = limit > 0 ? Math.min(999, Math.round((used / limit) * 100)) : 0;
+    // Green under 60%, amber 60–80%, red above — mirrors the compaction threshold.
+    const ctxColor = pct >= 80 ? t.error : pct >= 60 ? t.warning : t.muted;
+    const ctxTag = t.dim("  ·  ") + ctxColor(`${pct}% ctx`);
+    const effortVal = this.data.effort();
+    const effortTag = effortVal ? t.dim("  ·  ") + t.muted("effort: ") + t.accent(effortVal) : "";
     const mode = this.data.mode();
     const modeColor = mode === "default" ? t.muted : t.warning;
     const modeTag = t.dim("  ·  ") + t.muted("mode: ") + modeColor(mode);
@@ -53,6 +62,8 @@ export class Footer implements Component {
       t.muted(statusRaw) +
       t.dim(`  ·  ${this.data.turns()} turns`) +
       tok +
+      ctxTag +
+      effortTag +
       modeTag +
       undercoverTag;
     const right = t.dim(`${this.data.provider()} `) + t.accent(this.data.model());
