@@ -9,6 +9,7 @@ import {
   streamWithProviderRetry,
 } from "./provider/retry.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { modelContextLimit } from "./models-catalog.js";
 
 export interface AgentEvents {
   reasoningDelta(text: string): void;
@@ -63,7 +64,13 @@ const TOOL_RESULT_BUDGET = Number(process.env.C_AGENT_TOOL_RESULT_BUDGET) || 120
 
 // Context budget (in tokens, ~4 chars each). Compact when the transcript estimate
 // crosses COMPACT_RATIO of the budget, keeping the most recent turns verbatim.
-const CONTEXT_TOKENS = Number(process.env.C_AGENT_CONTEXT_TOKENS) || 160_000;
+// The budget is per-model (models.dev catalog, see contextLimit()); these are the
+// fallbacks: an explicit env override wins over everything, else 160k when the
+// model is unknown to the catalog.
+const CONTEXT_TOKENS_OVERRIDE = process.env.C_AGENT_CONTEXT_TOKENS
+  ? Number(process.env.C_AGENT_CONTEXT_TOKENS)
+  : undefined;
+const CONTEXT_TOKENS_DEFAULT = 160_000;
 const COMPACT_RATIO = 0.8;
 const KEEP_TURNS = 3; // recent user turns kept verbatim across a compaction
 // Microcompaction clears the content of older tool results (keeping the most
@@ -179,9 +186,14 @@ export class Agent {
     return this.provider.listModels ? this.provider.listModels() : [];
   }
 
-  /** Token budget for the context window (footer % + compaction trigger). */
+  /**
+   * Token budget for the context window (footer % + compaction trigger).
+   * Precedence: explicit env override → the current model's context window from
+   * the models.dev catalog → 160k default for models the catalog doesn't know.
+   */
   contextLimit(): number {
-    return CONTEXT_TOKENS;
+    if (CONTEXT_TOKENS_OVERRIDE) return CONTEXT_TOKENS_OVERRIDE;
+    return modelContextLimit(this.model) ?? CONTEXT_TOKENS_DEFAULT;
   }
 
   // Valid reasoning levels per wire dialect.
@@ -442,7 +454,8 @@ export class Agent {
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return ev.interrupted();
 
-      if (this.contextTokens() > CONTEXT_TOKENS * COMPACT_RATIO) {
+      const compactThreshold = this.contextLimit() * COMPACT_RATIO;
+      if (this.contextTokens() > compactThreshold) {
         // Cheap pass first: clear old tool output. Only summarize if still over.
         const freed = this.microCompact();
         if (freed > 0)
@@ -450,7 +463,7 @@ export class Agent {
             `micro-compacted: cleared ~${freed} tokens of old tool output`,
             false, // tool results blanked in place — message/turn structure intact
           );
-        if (this.contextTokens() > CONTEXT_TOKENS * COMPACT_RATIO) {
+        if (this.contextTokens() > compactThreshold) {
           await this.compact(ev, signal);
         }
         if (signal.aborted) return ev.interrupted();

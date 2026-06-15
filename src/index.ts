@@ -6,6 +6,7 @@ import { skillTool } from "./tools/skill.js";
 import { taskTool } from "./tools/task.js";
 import { ProcessManager } from "./process/manager.js";
 import { resolveProvider } from "./provider/index.js";
+import { refreshCatalog } from "./models-catalog.js";
 import type { Provider } from "./provider/types.js";
 import { App } from "./tui/app.js";
 import { configuredModelIds, loadSettings } from "./settings.js";
@@ -71,6 +72,11 @@ async function main() {
   const cwd = process.cwd();
 
   const settings = loadSettings(cwd);
+
+  // Refresh the per-model context-window catalog (models.dev) in the background.
+  // Cached on disk and re-fetched at most weekly; sizes each model's context
+  // budget. Fire-and-forget — lookups fall back to a default until it lands.
+  void refreshCatalog();
 
   // Scrub configured provider key env-vars (apiKeyEnv) from child processes too,
   // on top of the built-in secret list.
