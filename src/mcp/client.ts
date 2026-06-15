@@ -46,6 +46,8 @@ export class McpClient {
 
   capabilities: Record<string, any> = {};
   serverInfo: { name?: string; version?: string } = {};
+  /** Optional usage guidance the server returns from the initialize handshake. */
+  instructions = "";
 
   constructor(
     readonly name: string,
@@ -67,6 +69,7 @@ export class McpClient {
     });
     this.capabilities = init?.capabilities ?? {};
     this.serverInfo = init?.serverInfo ?? {};
+    this.instructions = typeof init?.instructions === "string" ? init.instructions : "";
     this.notify("notifications/initialized");
   }
 

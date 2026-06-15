@@ -9,6 +9,8 @@ export interface ServerStatus {
   resources: McpResource[];
   prompts: McpPrompt[];
   error?: string;
+  /** Usage guidance returned by the server's initialize handshake, if any. */
+  instructions?: string;
 }
 
 export interface McpConnectResult {
@@ -16,6 +18,8 @@ export interface McpConnectResult {
   registered: number;
   servers: ServerStatus[];
   summary: string;
+  /** Concatenated per-server usage instructions, ready to inject into the prompt. */
+  instructions: string;
 }
 
 /** Sanitize server/tool names into the `mcp__<server>__<tool>` namespace. */
@@ -64,7 +68,14 @@ export async function connectMcpServers(
         }
         clients.push(client);
         byName.set(name, client);
-        statuses.push({ name, ok: true, tools: tools.length, resources, prompts });
+        statuses.push({
+          name,
+          ok: true,
+          tools: tools.length,
+          resources,
+          prompts,
+          instructions: client.instructions,
+        });
       } catch (err: any) {
         client.close();
         statuses.push({ name, ok: false, tools: 0, resources: [], prompts: [], error: err?.message ?? String(err) });
@@ -75,11 +86,17 @@ export async function connectMcpServers(
   const hasResources = statuses.some((s) => s.resources.length > 0);
   if (hasResources) registry.register(makeResourceTool(byName));
 
+  const instructions = statuses
+    .filter((s) => s.ok && s.instructions && s.instructions.trim())
+    .map((s) => `## ${s.name}\n${s.instructions!.trim()}`)
+    .join("\n\n");
+
   return {
     clients,
     registered,
     servers: statuses,
     summary: renderSummary(statuses, registered),
+    instructions,
   };
 }
 

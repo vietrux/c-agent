@@ -1,15 +1,14 @@
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { Session } from "./session.js";
 import { ToolRegistry, ToolContext } from "./tools/registry.js";
 import { StreamingToolScheduler, type ToolEventInfo } from "./tools/scheduler.js";
 import { capToolResultsAggregate } from "./tools/result-cap.js";
-import { BASE_SYSTEM_A, BEHAVIOR_GUIDANCE_C } from "./.system_prompt.js";
+import { BASE_SYSTEM_A, BEHAVIOR_GUIDANCE_C } from "./profiles.js";
 import type { Provider, Usage, NeutralMessage } from "./provider/types.js";
 import {
   isAbortError,
   streamWithProviderRetry,
 } from "./provider/retry.js";
+import { buildSystemPrompt } from "./system-prompt.js";
 
 export interface AgentEvents {
   reasoningDelta(text: string): void;
@@ -142,7 +141,10 @@ Output ONLY the note, wrapped in <summary> tags, with these sections:
 No preamble, no commentary outside the <summary> tags.`;
 
 export class Agent {
-  private system: string;
+  private systemBase: string;
+  private isSubagent: boolean;
+  /** Resolved system prompt, computed once (git probe + MCP) then reused. */
+  private systemCache: string | null = null;
   private ac: AbortController | null = null;
   /** Cumulative wire usage across the whole session (billing-style total). */
   readonly usage: Usage = { input: 0, output: 0, cached: 0 };
@@ -162,6 +164,7 @@ export class Agent {
 
   setModel(m: string) {
     this.provider.model = m;
+    this.systemCache = null; // env block names the model — rebuild on next turn
   }
 
   /** Switch the backing provider (model picker across multiple providers). */
@@ -169,6 +172,7 @@ export class Agent {
     const rp = this.provider as Provider & { setInner?: (p: Provider) => void };
     if (typeof rp.setInner === "function") rp.setInner(p);
     else this.provider = p;
+    this.systemCache = null; // model/backend changed — rebuild on next turn
   }
 
   async listModels(): Promise<string[]> {
@@ -181,8 +185,31 @@ export class Agent {
     private toolCtx: ToolContext,
     private provider: Provider,
     systemBase?: string, // subagents pass their own role prompt
+    subagent = false, // subagents get a focused role note, no git-status block
   ) {
-    this.system = buildSystem(toolCtx.cwd, toolCtx.skills, systemBase);
+    this.systemBase = systemBase || BASE_SYSTEM;
+    this.isSubagent = subagent;
+  }
+
+  /**
+   * Resolve the system prompt, computing the volatile context (git probe, MCP
+   * instructions) once and caching it. Invalidated when the model/provider or
+   * session changes so the env block and git snapshot stay accurate.
+   */
+  private async resolveSystem(): Promise<string> {
+    if (this.systemCache !== null) return this.systemCache;
+    this.systemCache = await buildSystemPrompt({
+      base: this.systemBase,
+      behavior: BEHAVIOR_GUIDANCE,
+      cwd: this.toolCtx.cwd,
+      model: this.provider.model,
+      skills: this.toolCtx.skills,
+      toolNames: this.registry.specs().map((s) => s.name),
+      mcpInstructions: this.toolCtx.mcpInstructions,
+      pm: this.toolCtx.pm,
+      subagent: this.isSubagent,
+    });
+    return this.systemCache;
   }
 
   /** Abort the in-flight request, if any. Also kills running foreground tool
@@ -197,6 +224,7 @@ export class Agent {
     this.session = session;
     this.lastSentTokens = 0; // re-anchor context accounting to the new transcript
     this.lastSentMsgCount = 0;
+    this.systemCache = null; // refresh the git snapshot for the resumed session
   }
 
   async run(
@@ -353,6 +381,11 @@ export class Agent {
     const signal = this.ac.signal;
     let recoveredOverflow = false; // one prompt-too-long recovery per turn
 
+    // Build the system prompt up front (git probe + MCP instructions, cached).
+    ev.status("preparing…");
+    const system = await this.resolveSystem();
+    if (signal.aborted) return ev.interrupted();
+
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return ev.interrupted();
 
@@ -389,7 +422,7 @@ export class Agent {
       try {
         result = await streamWithProviderRetry(
           this.provider,
-          this.system,
+          system,
           this.session.messages,
           this.registry.specs(),
           {
@@ -473,42 +506,4 @@ export class Agent {
     ev.toolEnd("agent", `stopped after ${MAX_STEPS} steps`, true);
   }
 
-}
-
-function buildSystem(
-  cwd: string,
-  skills?: { name: string; description: string }[],
-  base: string = BASE_SYSTEM,
-): string {
-  const now = new Date();
-  const env = [
-    `cwd: ${cwd}`,
-    `os: ${process.platform}`,
-    `shell: ${process.env.SHELL ?? "unknown"}`,
-    `date: ${now.toISOString().slice(0, 10)}`,
-  ];
-  let prompt = `${base}\n\n${BEHAVIOR_GUIDANCE}\n\n<environment>\n${env.join("\n")}\n</environment>`;
-
-  if (skills && skills.length > 0) {
-    const list = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
-    prompt +=
-      `\n\n<skills>\nThese skills are available. When a task matches one or more skills, call the \`skill\` tool ` +
-      `to load full instructions BEFORE proceeding. If multiple skills match, load them together with ` +
-      `\`names: [...]\` and compose their instructions for the task.\n${list}\n</skills>`;
-  }
-
-  for (const name of ["CAGENT.md", "AGENTS.md"]) {
-    const p = resolve(cwd, name);
-    if (existsSync(p)) {
-      try {
-        const content = readFileSync(p, "utf8").trim();
-        if (content)
-          prompt += `\n\n<project-instructions file="${name}">\n${content}\n</project-instructions>`;
-      } catch {
-        /* ignore unreadable project file */
-      }
-      break;
-    }
-  }
-  return prompt;
 }

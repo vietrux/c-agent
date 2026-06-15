@@ -43,6 +43,20 @@ function emptyOpenAIStream(reasoning?: string) {
   };
 }
 
+// Yields each pre-built chunk, bumping `counter.n` so a test can tell whether a
+// tool call was emitted mid-stream (n < total) or at the flush after it (n ===
+// total).
+function chunkStream(events: any[], counter: { n: number }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const ev of events) {
+        counter.n++;
+        yield ev;
+      }
+    },
+  };
+}
+
 function anthropicStream(finalText = "ok", thinking?: string) {
   const listeners: Record<string, (...args: any[]) => void> = {};
   return {
@@ -348,6 +362,62 @@ await test("openai-compatible stream forwards Ollama delta.reasoning", async () 
   });
   assert.equal(result.text, "ok");
   assert.equal(reasoning, "ollama reasoning");
+});
+
+await test("openai stream emits tool calls mid-stream and synthesizes missing ids", async () => {
+  const { provider } = resolveProvider({ type: "openai", apiKey: "test", model: "m" });
+  const counter = { n: 0 };
+  const events = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "read", arguments: '{"path":' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"/tmp/x"}' } }] } }] },
+    // index 1 begins (and carries no id) → index 0 is now complete and emitted.
+    { choices: [{ delta: { tool_calls: [{ index: 1, function: { name: "grep", arguments: '{"pattern":"y"}' } }] } }] },
+    { choices: [{ delta: { content: "done" } }], usage: { prompt_tokens: 5, completion_tokens: 2 } },
+  ];
+  (provider as any).client = {
+    chat: { completions: { create: async () => chunkStream(events, counter) } },
+  };
+
+  const emitted: { tc: any; at: number }[] = [];
+  const result = await provider.stream("s", [{ role: "user", content: "hi" }], [], {
+    onText() {},
+    onToolCallReady: (tc) => emitted.push({ tc, at: counter.n }),
+  });
+
+  assert.equal(emitted.length, 2); // each call emitted exactly once
+  // First call's args span two chunks and it is emitted as soon as index 1
+  // starts — before the stream ends (proving the scheduler can start early).
+  assert.ok(emitted[0].at < events.length, `expected mid-stream emit, got at=${emitted[0].at}`);
+  assert.equal(emitted[0].tc.id, "call_a");
+  assert.deepEqual(emitted[0].tc.input, { path: "/tmp/x" });
+  // Second call had no id → synthesized, distinct (no collision with the first).
+  assert.equal(emitted[1].tc.id, "call_1");
+  assert.deepEqual(emitted[1].tc.input, { pattern: "y" });
+  // Returned toolCalls mirror the emitted callbacks exactly.
+  assert.deepEqual(result.toolCalls.map((t) => t.id), ["call_a", "call_1"]);
+  assert.deepEqual(result.toolCalls.map((t) => t.input), [{ path: "/tmp/x" }, { pattern: "y" }]);
+  assert.equal(result.usage.input, 5);
+});
+
+await test("openai stream synthesizes distinct ids when all tool-call ids are absent", async () => {
+  const { provider } = resolveProvider({ type: "openai", apiKey: "test", model: "m" });
+  const counter = { n: 0 };
+  const events = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "read", arguments: '{"path":"a"}' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 1, function: { name: "read", arguments: '{"path":"b"}' } }] } }] },
+    { choices: [{ delta: { content: "" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+  ];
+  (provider as any).client = {
+    chat: { completions: { create: async () => chunkStream(events, counter) } },
+  };
+
+  const ids: string[] = [];
+  const result = await provider.stream("s", [{ role: "user", content: "hi" }], [], {
+    onText() {},
+    onToolCallReady: (tc) => ids.push(tc.id),
+  });
+  assert.equal(new Set(ids).size, 2); // no empty-id collision
+  assert.deepEqual(result.toolCalls.map((t) => t.id), ["call_0", "call_1"]);
 });
 
 await test("anthropic stream payload includes selected model params", async () => {

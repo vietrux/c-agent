@@ -198,7 +198,7 @@ async function main() {
           },
         }
       : NOOP_EVENTS;
-    const subAgent = new Agent(subSession, subRegistry, subCtx, provider, def?.systemPrompt);
+    const subAgent = new Agent(subSession, subRegistry, subCtx, provider, def?.systemPrompt, true);
     const run = async (): Promise<string> => {
       await subAgent.run(prompt, events);
       const last = [...subSession.messages]
@@ -240,6 +240,7 @@ async function main() {
   if (Object.keys(settings.mcpServers).length > 0) {
     const r = await connectMcpServers(registry, settings.mcpServers);
     mcpSummary = r.summary;
+    if (r.instructions) toolCtx.mcpInstructions = r.instructions;
     const shutdownMcp = () => r.clients.forEach((c) => c.close());
     process.on("exit", shutdownMcp);
   }

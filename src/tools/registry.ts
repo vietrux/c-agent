@@ -62,6 +62,8 @@ export interface ToolContext {
   hooks?: HookRunner;
   /** Active model backend — used by web_fetch to summarize fetched content. */
   provider?: Provider;
+  /** Instructions advertised by connected MCP servers, injected into the prompt. */
+  mcpInstructions?: string;
 }
 
 export interface ToolResult {

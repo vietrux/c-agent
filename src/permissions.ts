@@ -50,13 +50,167 @@ function parseRule(raw: string): Rule | null {
   return { tool, matcher: new RegExp(re) };
 }
 
-function matches(rules: Rule[], tool: string, input: any): boolean {
-  const target = ruleTarget(tool, input);
+function matchesTarget(rules: Rule[], tool: string, target: string): boolean {
   for (const r of rules) {
     if (r.tool !== tool) continue;
     if (r.matcher === null || r.matcher.test(target)) return true;
   }
   return false;
+}
+
+function matches(rules: Rule[], tool: string, input: any): boolean {
+  return matchesTarget(rules, tool, ruleTarget(tool, input));
+}
+
+/**
+ * Split a shell command into the individual commands it would execute, so each
+ * can be matched against permission rules on its own. Quote- and escape-aware:
+ * splits on unquoted `;`, `|`, `&`, `&&`, `||`, and newlines, descends into
+ * `$( )`, backticks, and process substitution, and treats `( ) { }` grouping as
+ * boundaries.
+ *
+ * Deliberately over-splits — surfacing MORE executable fragments is the safe
+ * direction for both checks: deny fires if ANY fragment is denied, and a
+ * blanket allow requires EVERY fragment to be allowed. Without this, a rule like
+ * `bash(git commit:*)` matched the whole line, so `git commit -m x && rm -rf ~`
+ * was auto-approved, and a deny like `bash(rm:*)` was evaded by `x && rm …`.
+ *
+ * Returns [] for an empty command.
+ */
+export function bashSegments(command: string): string[] {
+  const segments: string[] = [];
+  let buf = "";
+  let i = 0;
+  const n = command.length;
+
+  const flush = () => {
+    const t = buf.trim();
+    if (t) segments.push(t);
+    buf = "";
+  };
+  const descend = (body: string) => {
+    for (const s of bashSegments(body)) segments.push(s);
+  };
+
+  while (i < n) {
+    const ch = command[i]!;
+
+    // Backslash escape (outside single quotes): keep the next char literally.
+    if (ch === "\\") {
+      buf += ch + (command[i + 1] ?? "");
+      i += 2;
+      continue;
+    }
+
+    // Single quotes: fully literal — no separators, no substitution.
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0) {
+        buf += command.slice(i);
+        break;
+      }
+      buf += command.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+
+    // Double quotes: literal except embedded $( ) / backtick substitutions,
+    // whose inner commands are extracted as their own segments.
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < n && command[j] !== '"') {
+        if (command[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (command[j] === "$" && command[j + 1] === "(") {
+          const { body, end } = extractParen(command, j + 1);
+          descend(body);
+          j = end;
+          continue;
+        }
+        if (command[j] === "`") {
+          const end = command.indexOf("`", j + 1);
+          if (end < 0) {
+            j = n;
+            break;
+          }
+          descend(command.slice(j + 1, end));
+          j = end + 1;
+          continue;
+        }
+        j++;
+      }
+      buf += command.slice(i, Math.min(j + 1, n));
+      i = j + 1;
+      continue;
+    }
+
+    // $( ) command substitution at top level.
+    if (ch === "$" && command[i + 1] === "(") {
+      const { body, end } = extractParen(command, i + 1);
+      descend(body);
+      i = end;
+      continue;
+    }
+
+    // Backtick command substitution.
+    if (ch === "`") {
+      const end = command.indexOf("`", i + 1);
+      if (end < 0) break;
+      descend(command.slice(i + 1, end));
+      i = end + 1;
+      continue;
+    }
+
+    // Subshell `( )` and process substitution `<( )` / `>( )`.
+    if (ch === "(" || ((ch === "<" || ch === ">") && command[i + 1] === "(")) {
+      const open = ch === "(" ? i : i + 1;
+      const { body, end } = extractParen(command, open);
+      flush();
+      descend(body);
+      i = end;
+      continue;
+    }
+
+    // Command separators.
+    if (ch === "\n" || ch === ";") {
+      flush();
+      i++;
+      continue;
+    }
+    if (ch === "&" || ch === "|") {
+      flush();
+      i++;
+      while (command[i] === "&" || command[i] === "|") i++; // &&, ||, |&
+      continue;
+    }
+
+    // Grouping boundaries.
+    if (ch === "{" || ch === "}" || ch === ")") {
+      flush();
+      i++;
+      continue;
+    }
+
+    buf += ch;
+    i++;
+  }
+  flush();
+  return segments;
+}
+
+/** Body between the matched `( )` starting at `openIdx`, and the index past `)`. */
+function extractParen(s: string, openIdx: number): { body: string; end: number } {
+  let depth = 0;
+  for (let k = openIdx; k < s.length; k++) {
+    if (s[k] === "(") depth++;
+    else if (s[k] === ")") {
+      depth--;
+      if (depth === 0) return { body: s.slice(openIdx + 1, k), end: k + 1 };
+    }
+  }
+  return { body: s.slice(openIdx + 1), end: s.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +330,9 @@ export class PermissionEngine {
 
     // Exact-command rule: only re-matches that identical invocation, but that
     // beats granting all of bash. Safe for single-use commands (rm, dd, …).
+    // Only offered for a single-segment command — a chained command is matched
+    // per segment, so an exact whole-line rule could never re-match it anyway.
+    if (bashSegments(command).length > 1) return null;
     const shortCmd = command.length > 50 ? command.slice(0, 50) + "…" : command;
     return {
       spec: `bash(${command})`,
@@ -185,6 +342,8 @@ export class PermissionEngine {
 
   /** Decide allow/deny/ask for a tool call. `risky` = tool mutates state. */
   evaluate(tool: string, input: any, risky: boolean): Eval {
+    if (tool === "bash") return this.evaluateBash(input, risky);
+
     if (matches(this.deny, tool, input)) return "deny";
     if (this.mode === "bypass") return "allow";
     if (matches(this.allow, tool, input)) return "allow";
@@ -195,5 +354,30 @@ export class PermissionEngine {
     if (this.mode === "plan") return "deny"; // plan mode: no mutations
     if (this.mode === "acceptEdits" && EDIT_TOOLS.has(tool)) return "allow";
     return "ask";
+  }
+
+  /**
+   * Bash is evaluated per executable segment so a rule can't be escaped (or
+   * abused) by command chaining: deny if ANY segment is denied, and treat the
+   * call as rule-allowed only if EVERY segment is allowed by an allow rule. A
+   * command that won't parse into segments is never auto-allowed by rules.
+   */
+  private evaluateBash(input: any, risky: boolean): Eval {
+    const command = String(input?.command ?? "");
+    const segments = bashSegments(command);
+    const denyTargets = segments.length > 0 ? segments : [command];
+    if (denyTargets.some((seg) => matchesTarget(this.deny, "bash", seg))) return "deny";
+
+    if (this.mode === "bypass") return "allow";
+
+    const allowRules = [...this.allow, ...this.sessionAllow];
+    const allowedByRules =
+      segments.length > 0 &&
+      segments.every((seg) => matchesTarget(allowRules, "bash", seg));
+    if (allowedByRules) return "allow";
+
+    if (!risky) return "allow";
+    if (this.mode === "plan") return "deny"; // plan mode: no mutations
+    return "ask"; // acceptEdits applies to edit tools only, not bash
   }
 }
