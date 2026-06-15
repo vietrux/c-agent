@@ -29,9 +29,8 @@ export class AnthropicProvider implements Provider {
     params?: ProviderRequestParams;
     modelParams?: Record<string, ProviderRequestParams>;
   }) {
-    // SDK retries transient failures (429/5xx/overloaded) with exponential
-    // backoff and honors Retry-After; bumped above the default 2.
-    this.client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 5 });
+    // c-agent owns stream retries so retry timing is visible and Esc can stop waits.
+    this.client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL, maxRetries: 0 });
     this._model = opts.model;
     this.defaultParams = sanitizeParams(opts.params);
     this.modelParams = sanitizeModelParams(opts.modelParams);

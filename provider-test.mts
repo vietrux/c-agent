@@ -10,6 +10,10 @@ import {
   type ProviderConfig,
 } from "./src/settings.js";
 import type { NeutralMessage, Provider, StreamResult } from "./src/provider/types.js";
+import {
+  providerRetryDelayMs,
+  streamWithProviderRetry,
+} from "./src/provider/retry.js";
 
 let passed = 0;
 let failed = 0;
@@ -69,6 +73,113 @@ async function runOneTurn(
   const messages: NeutralMessage[] = [{ role: "user", content: "hi" }];
   return provider.stream("system", messages, [], { onText() {}, onReasoning });
 }
+
+function streamResult(text = "ok"): StreamResult {
+  return { text, toolCalls: [], usage: { input: 1, output: 1, cached: 0 } };
+}
+
+await test("provider retry uses requested backoff and stops after ten attempts", async () => {
+  assert.deepEqual([1, 2, 3, 4, 5].map(providerRetryDelayMs), [
+    1000,
+    2000,
+    3000,
+    6000,
+    9000,
+  ]);
+
+  let attempts = 0;
+  const delays: number[] = [];
+  const provider: Provider = {
+    model: "retry-model",
+    async stream() {
+      attempts++;
+      if (attempts < 10) throw new Error(`boom ${attempts}`);
+      return streamResult("done");
+    },
+  };
+
+  const result = await streamWithProviderRetry(
+    provider,
+    "system",
+    [{ role: "user", content: "hi" }],
+    [],
+    { onText() {} },
+    undefined,
+    { delay: async (ms) => void delays.push(ms) },
+  );
+
+  assert.equal(result.text, "done");
+  assert.equal(attempts, 10);
+  assert.deepEqual(delays, [
+    1000,
+    2000,
+    3000,
+    6000,
+    9000,
+    12000,
+    15000,
+    18000,
+    21000,
+  ]);
+});
+
+await test("provider retry stops on abort during retry wait", async () => {
+  let attempts = 0;
+  const ac = new AbortController();
+  const provider: Provider = {
+    model: "retry-model",
+    async stream() {
+      attempts++;
+      throw new Error("temporary");
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      streamWithProviderRetry(
+        provider,
+        "system",
+        [{ role: "user", content: "hi" }],
+        [],
+        { onText() {} },
+        ac.signal,
+        {
+          delay: async () => {
+            ac.abort();
+          },
+        },
+      ),
+    { name: "AbortError" },
+  );
+  assert.equal(attempts, 1);
+});
+
+await test("provider retry does not retry after streamed output", async () => {
+  let attempts = 0;
+  let text = "";
+  const provider: Provider = {
+    model: "retry-model",
+    async stream(_system, _messages, _tools, handlers) {
+      attempts++;
+      handlers.onText("partial");
+      throw new Error("stream failed");
+    },
+  };
+
+  await assert.rejects(() =>
+    streamWithProviderRetry(
+      provider,
+      "system",
+      [{ role: "user", content: "hi" }],
+      [],
+      { onText: (delta) => (text += delta) },
+      undefined,
+      { delay: async () => undefined },
+    ),
+  );
+  assert.equal(attempts, 1);
+  assert.equal(text, "partial");
+});
 
 await test("allows explicit no-auth custom provider to keep configured model", () => {
   const { provider } = resolveProvider({

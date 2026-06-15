@@ -6,6 +6,10 @@ import { StreamingToolScheduler, type ToolEventInfo } from "./tools/scheduler.js
 import { capToolResultsAggregate } from "./tools/result-cap.js";
 import { BASE_SYSTEM_A, BEHAVIOR_GUIDANCE_C } from "./.system_prompt.js";
 import type { Provider, Usage, NeutralMessage } from "./provider/types.js";
+import {
+  isAbortError,
+  streamWithProviderRetry,
+} from "./provider/retry.js";
 
 export interface AgentEvents {
   reasoningDelta(text: string): void;
@@ -70,9 +74,6 @@ const MICRO_KEEP = 4;
 const CLEARED_TOOL_RESULT = "[Old tool result content cleared]";
 const MAX_COMPACT_FAILURES = 3; // circuit breaker: stop retrying a failing summary
 
-function isAbort(err: any): boolean {
-  return err?.name === "AbortError" || /abort/i.test(err?.message ?? "");
-}
 
 /** A context-window-overflow error (so we can compact and retry instead of dying). */
 function isContextOverflow(err: any): boolean {
@@ -118,6 +119,10 @@ function renderTranscript(messages: NeutralMessage[]): string {
     }
   }
   return out.join("\n");
+}
+
+function formatRetryDelay(ms: number): string {
+  return `${Math.round(ms / 1000)}s`;
 }
 
 // Structured summary prompt for compaction — a dense, sectioned handoff note
@@ -262,7 +267,8 @@ export class Agent {
     ev.status("compacting…");
     let summary: string;
     try {
-      const res = await this.provider.stream(
+      const res = await streamWithProviderRetry(
+        this.provider,
         COMPACT_SUMMARY_SYSTEM,
         [
           {
@@ -273,6 +279,12 @@ export class Agent {
         [],
         { onText: () => {} },
         signal,
+        {
+          onRetry: ({ retryNumber, maxAttempts, delayMs }) =>
+            ev.status(
+              `provider error; retry ${retryNumber + 1}/${maxAttempts} in ${formatRetryDelay(delayMs)}…`,
+            ),
+        },
       );
       summary = res.text.trim();
     } catch {
@@ -375,7 +387,8 @@ export class Agent {
 
       let result;
       try {
-        result = await this.provider.stream(
+        result = await streamWithProviderRetry(
+          this.provider,
           this.system,
           this.session.messages,
           this.registry.specs(),
@@ -387,10 +400,17 @@ export class Agent {
             },
           },
           signal,
+          {
+            shouldRetry: (err) => !isContextOverflow(err),
+            onRetry: ({ retryNumber, maxAttempts, delayMs }) =>
+              ev.status(
+                `provider error; retry ${retryNumber + 1}/${maxAttempts} in ${formatRetryDelay(delayMs)}…`,
+              ),
+          },
         );
       } catch (err) {
         ev.assistantEnd();
-        if (isAbort(err)) return ev.interrupted();
+        if (isAbortError(err)) return ev.interrupted();
         // Context overflow: reclaim space (micro then summary) and retry once.
         if (isContextOverflow(err) && !recoveredOverflow) {
           recoveredOverflow = true;
