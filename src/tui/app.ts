@@ -16,6 +16,7 @@ import { Footer } from "./footer.js";
 import { randomUUID } from "node:crypto";
 import { TranscriptView } from "./transcript.js";
 import { BottomSlot } from "./bottom-slot.js";
+import { ScrollView } from "./scroll-view.js";
 import { ModelPicker, type ProviderEntry } from "./model-picker.js";
 import { BgTasks } from "./bg-tasks.js";
 import { handleCommand } from "./commands.js";
@@ -30,6 +31,7 @@ import type { FileCheckpointer } from "../checkpoint.js";
 import type { SessionStore } from "../store.js";
 import type { UndercoverState } from "../utils/redact.js";
 import { loadHistory, pushHistory } from "../history.js";
+import { loadPrefs, savePrefs } from "../prefs.js";
 
 export type { ProviderEntry } from "./model-picker.js";
 
@@ -44,6 +46,7 @@ export class App {
   tui: TUI;
   view: TranscriptView;
   slot: BottomSlot;
+  private scroll!: ScrollView; // wraps the transcript; only active in fullscreen
 
   private headerText: Text | null = null;
   private modelPicker: ModelPicker;
@@ -135,6 +138,7 @@ export class App {
   private async submit(text: string, fromQueue = false) {
     const trimmed = text.trim();
     if (!trimmed) return;
+    this.scroll?.toBottom(); // a new message returns the view to the latest line
     // Record every submission for bash-style up/down recall (incl. slash cmds).
     if (!fromQueue) {
       this.slot.editor.addToHistory(trimmed);
@@ -395,6 +399,87 @@ export class App {
     this.tui.requestRender();
   }
 
+  // ---- fullscreen (alternate screen buffer) -------------------------------
+
+  /** True while the TUI owns the alternate screen buffer. */
+  fullscreen = false;
+  /** Renderer diff-state captured on entry, restored on exit for a seamless toggle. */
+  private savedRender: Record<string, unknown> | null = null;
+  private altExitHooked = false;
+
+  /**
+   * /fullscreen [on|off]: take over the whole terminal via the alternate screen
+   * buffer (like vim/less/htop), or hand it back. A bare `/fullscreen` toggles.
+   * The choice is persisted and re-applied on the next launch.
+   */
+  toggleFullscreen(arg = ""): void {
+    const a = arg.toLowerCase().trim();
+    const want = a === "on" ? true : a === "off" ? false : !this.fullscreen;
+    if (want === this.fullscreen) {
+      this.view.addBlock(notice(`fullscreen already ${want ? "on" : "off"}`));
+      this.tui.requestRender();
+    } else {
+      this.applyFullscreen(want);
+    }
+    savePrefs({ fullscreen: want }); // remember for future sessions
+  }
+
+  /** Enter or leave the alt screen and redraw. Shared by the command and startup. */
+  applyFullscreen(on: boolean): void {
+    // pi-tui's render bookkeeping is private; reaching it is the price of
+    // bolting an alt-screen mode onto an inline renderer.
+    const r = this.tui as unknown as Record<string, unknown>;
+    if (on) {
+      if (this.fullscreen) return;
+      // Capture exactly the fields requestRender(true) is about to reset, so
+      // leaving fullscreen can resume the inline transcript instead of redrawing
+      // over the user's shell scrollback.
+      this.savedRender = {
+        previousLines: r.previousLines,
+        previousWidth: r.previousWidth,
+        previousHeight: r.previousHeight,
+        cursorRow: r.cursorRow,
+        hardwareCursorRow: r.hardwareCursorRow,
+        maxLinesRendered: r.maxLinesRendered,
+        previousViewportTop: r.previousViewportTop,
+        previousKittyImageIds: r.previousKittyImageIds,
+      };
+      this.tui.terminal.write("\x1b[?1049h"); // enter alt buffer (saves cursor)
+      this.fullscreen = true;
+      this.scroll.enabled = true; // window the transcript (no native scrollback here)
+      this.scroll.toBottom();
+      this.ensureAltExitHook();
+      this.view.addBlock(
+        notice("⛶ fullscreen on — PgUp/PgDn to scroll · /fullscreen off to exit"),
+      );
+      this.tui.requestRender(true); // clean full render at the top of the alt buffer
+    } else {
+      this.scroll.enabled = false; // back to inline pass-through + native scrollback
+      this.leaveAltScreen();
+      if (this.savedRender) {
+        Object.assign(r, this.savedRender); // realign diffing with the restored buffer
+        this.savedRender = null;
+      }
+      this.tui.requestRender(); // append anything that arrived while fullscreen
+    }
+  }
+
+  /** Switch back to the normal screen buffer if we own the alt one. Idempotent. */
+  leaveAltScreen(): void {
+    if (!this.fullscreen) return;
+    this.tui.terminal.write("\x1b[?1049l"); // restore normal buffer + cursor
+    this.fullscreen = false;
+  }
+
+  /** Safety net: never strand the user in the alt buffer if the process dies. */
+  private ensureAltExitHook(): void {
+    if (this.altExitHooked) return;
+    this.altExitHooked = true;
+    process.on("exit", () => {
+      if (this.fullscreen) process.stdout.write("\x1b[?1049l");
+    });
+  }
+
   // ---- lifecycle ----------------------------------------------------------
 
   start() {
@@ -435,6 +520,10 @@ export class App {
             name: "undercover",
             description: "Toggle PII masking before sending to the model",
           },
+          {
+            name: "fullscreen",
+            description: "Full-screen TUI on/off (remembered next launch)",
+          },
           { name: "bg", description: "List/cancel background tasks" },
           { name: "mcp", description: "Show MCP server status" },
           { name: "context", description: "Show context token usage" },
@@ -469,7 +558,15 @@ export class App {
     });
 
     // layout (top → bottom). Editor draws its own top/bottom borders.
-    this.tui.addChild(this.view.container);
+    // In fullscreen the transcript is windowed by ScrollView (the alt screen has
+    // no native scrollback); inline, it's a pass-through. The reserve fn measures
+    // the editor + footer live so the window always sizes to the rows above them.
+    this.scroll = new ScrollView(
+      this.view.container,
+      this.tui,
+      (w) => this.slot.container.render(w).length + footer.render(w).length,
+    );
+    this.tui.addChild(this.scroll);
     this.tui.addChild(this.slot.container);
     this.tui.addChild(footer);
 
@@ -478,6 +575,7 @@ export class App {
       if (matchesKey(data, Key.ctrl("c"))) {
         const now = Date.now();
         if (now - this.ctrlCAt < 2000) {
+          this.leaveAltScreen();
           this.tui.stop();
           process.exit(0);
         }
@@ -485,6 +583,32 @@ export class App {
         if (this.busy) this.agent.abort(); // first press also interrupts any in-flight turn
         this.view.addBlock(notice("press Ctrl+C again to exit"));
         return { consume: true };
+      }
+      // Fullscreen scrolling: the alt screen has no native scrollback, so PgUp/
+      // PgDn (and Shift+↑/↓ for fine steps) move a window over the transcript.
+      // End jumps back to the latest line; only grabbed while actually scrolled
+      // up so the editor keeps End at the bottom.
+      if (this.fullscreen) {
+        if (matchesKey(data, Key.pageUp)) {
+          this.scroll.scrollByPage(1);
+          return { consume: true };
+        }
+        if (matchesKey(data, Key.pageDown)) {
+          this.scroll.scrollByPage(-1);
+          return { consume: true };
+        }
+        if (matchesKey(data, Key.shift("up"))) {
+          this.scroll.scrollByLines(1);
+          return { consume: true };
+        }
+        if (matchesKey(data, Key.shift("down"))) {
+          this.scroll.scrollByLines(-1);
+          return { consume: true };
+        }
+        if (this.scroll.scrolledUp && matchesKey(data, Key.end)) {
+          this.scroll.toBottom();
+          return { consume: true };
+        }
       }
       // Tab cycles permission mode — but only at an empty editor, so it doesn't
       // steal Tab from autocomplete while typing a command.
@@ -526,6 +650,9 @@ export class App {
       return undefined;
     });
     this.tui.start();
+
+    // Restore the persisted fullscreen choice from a previous session.
+    if (loadPrefs().fullscreen) this.applyFullscreen(true);
 
     // No model configured → prompt the user to pick one before chatting.
     if (!this.agent.model) {

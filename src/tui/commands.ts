@@ -18,6 +18,8 @@ export interface CommandHost {
   setUndercover(arg: string): void;
   pickModel(): void;
   openBgTasks(): void;
+  toggleFullscreen(arg?: string): void;
+  leaveAltScreen(): void;
 }
 
 /** Route a `/command` line to the matching host action. */
@@ -27,8 +29,12 @@ export function handleCommand(host: CommandHost, line: string): void {
   switch (cmd) {
     case "/exit":
     case "/quit":
+      host.leaveAltScreen();
       host.tui.stop();
       process.exit(0);
+      break;
+    case "/fullscreen":
+      host.toggleFullscreen(arg);
       break;
     case "/new":
       host.newConversation();
@@ -72,7 +78,7 @@ export function handleCommand(host: CommandHost, line: string): void {
     case "/help":
       host.view.addBlock(
         notice(
-          "/resume  /rewind  /compact  /model  /effort <level>  /undercover [on|off]  /bg  /mcp  /context  /new  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
+          "/resume  /rewind  /compact  /model  /effort <level>  /undercover [on|off]  /fullscreen [on|off]  /bg  /mcp  /context  /new  /exit  ·  Tab: mode · Ctrl+B: background · Ctrl+O/E: expand",
         ),
       );
       break;

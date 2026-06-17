@@ -485,6 +485,9 @@ export class Agent {
       );
 
       let result;
+      // Capture the thinking trace so it can be persisted with the turn — the
+      // provider streams it but doesn't return it in StreamResult.
+      let reasoningBuf = "";
       try {
         result = await streamWithProviderRetry(
           this.provider,
@@ -493,7 +496,10 @@ export class Agent {
           this.registry.specs(),
           {
             onText: (d) => ev.assistantDelta(d),
-            onReasoning: (d) => ev.reasoningDelta(d),
+            onReasoning: (d) => {
+              reasoningBuf += d;
+              ev.reasoningDelta(d);
+            },
             onToolCallReady: (tc) => {
               toolScheduler.add(tc);
             },
@@ -548,7 +554,12 @@ export class Agent {
       // Never commit an empty assistant turn (no text, no tool calls): the wire
       // format requires content or tool_calls set, so it 400s on the next send.
       if (text || toolCalls.length > 0)
-        this.session.push({ role: "assistant", content: text, toolCalls });
+        this.session.push({
+          role: "assistant",
+          content: text,
+          toolCalls,
+          ...(reasoningBuf.trim() ? { reasoning: reasoningBuf } : {}),
+        });
 
       if (toolCalls.length === 0) {
         ev.status(null);

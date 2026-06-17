@@ -9,6 +9,8 @@ export interface Prefs {
   /** Provider name + model id last chosen in /model, restored on next launch. */
   lastProvider?: string;
   lastModel?: string;
+  /** Whether the TUI starts in full-screen (alternate screen) mode. */
+  fullscreen?: boolean;
 }
 
 export function loadPrefs(): Prefs {
@@ -20,9 +22,11 @@ export function loadPrefs(): Prefs {
   }
 }
 
-export function savePrefs(p: Prefs): void {
+/** Merge a partial update into the stored prefs so callers don't clobber each
+ * other's fields (e.g. /model writing provider/model must not drop fullscreen). */
+export function savePrefs(p: Partial<Prefs>): void {
   try {
-    writeSecureFile(FILE, JSON.stringify(p));
+    writeSecureFile(FILE, JSON.stringify({ ...loadPrefs(), ...p }));
   } catch {
     /* best effort */
   }

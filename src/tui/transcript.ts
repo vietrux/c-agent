@@ -284,6 +284,13 @@ export class TranscriptView {
       } else if (m.role === "user") {
         this.addSpaced(new UserMessage(stripInjected(m.content)));
       } else if (m.role === "assistant") {
+        if (m.reasoning) {
+          const rb = new ReasoningBlock();
+          rb.append(m.reasoning);
+          rb.finish(); // collapsed-by-default; Ctrl+E expands the full trace
+          rb.setExpanded(this.reasoningExpanded);
+          this.addSpaced(rb);
+        }
         if (m.content) this.addSpaced(new Markdown(m.content, 1, 0, markdownTheme));
         for (const tc of m.toolCalls) {
           const tb = new ToolBlock(tc.name, toolArgPreview(tc.name, tc.input));

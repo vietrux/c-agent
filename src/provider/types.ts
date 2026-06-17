@@ -12,7 +12,9 @@ export interface ToolCall {
 
 export type NeutralMessage =
   | { role: "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls: ToolCall[] }
+  // `reasoning` is the model's thinking trace — persisted for display/resume
+  // only; providers ignore it when building wire messages.
+  | { role: "assistant"; content: string; toolCalls: ToolCall[]; reasoning?: string }
   | { role: "tool"; results: { id: string; content: string; isError: boolean }[] }
   // Harness-injected context (e.g. background-task completions). Own transcript
   // entry + own UI block — never folded into the user's message.
